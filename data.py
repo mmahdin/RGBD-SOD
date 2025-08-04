@@ -21,6 +21,8 @@ def cv_random_flip(img, label,depth):
     #     label = label.transpose(Image.FLIP_TOP_BOTTOM)
     #     depth = depth.transpose(Image.FLIP_TOP_BOTTOM)
     return img, label, depth
+
+
 def randomCrop(image, label,depth):
     border=30
     image_width = image.size[0]
@@ -31,6 +33,8 @@ def randomCrop(image, label,depth):
         (image_width - crop_win_width) >> 1, (image_height - crop_win_height) >> 1, (image_width + crop_win_width) >> 1,
         (image_height + crop_win_height) >> 1)
     return image.crop(random_region), label.crop(random_region),depth.crop(random_region)
+
+
 def randomRotation(image,label,depth):
     mode=Image.BICUBIC
     if random.random()>0.8:
@@ -39,6 +43,8 @@ def randomRotation(image,label,depth):
         label=label.rotate(random_angle, mode)
         depth=depth.rotate(random_angle, mode)
     return image,label,depth
+
+
 def colorEnhance(image):
     bright_intensity=random.randint(5,15)/10.0
     image=ImageEnhance.Brightness(image).enhance(bright_intensity)
@@ -49,6 +55,8 @@ def colorEnhance(image):
     sharp_intensity=random.randint(0,30)/10.0
     image=ImageEnhance.Sharpness(image).enhance(sharp_intensity)
     return image
+
+
 def randomGaussian(image, mean=0.1, sigma=0.35):
     def gaussianNoisy(im, mean=mean, sigma=sigma):
         for _i in range(len(im)):
@@ -59,6 +67,8 @@ def randomGaussian(image, mean=0.1, sigma=0.35):
     img = gaussianNoisy(img[:].flatten(), mean, sigma)
     img = img.reshape([width, height])
     return Image.fromarray(np.uint8(img))
+
+
 def randomPeper(img):
 
     img=np.array(img)
@@ -85,10 +95,8 @@ class SalObjDataset(data.Dataset):
     def __init__(self, image_root, gt_root,depth_root, trainsize):
         self.trainsize = trainsize
         self.images = [image_root + f for f in os.listdir(image_root) if f.endswith('.jpg')]
-        self.gts = [gt_root + f for f in os.listdir(gt_root) if f.endswith('.jpg')
-                    or f.endswith('.png')]
-        self.depths=[depth_root + f for f in os.listdir(depth_root) if f.endswith('.bmp')
-                    or f.endswith('.png')]
+        self.gts = [gt_root + f for f in os.listdir(gt_root) if f.endswith('.jpg') or f.endswith('.png')]
+        self.depths=[depth_root + f for f in os.listdir(depth_root) if f.endswith('.bmp') or f.endswith('.png')]
         self.images = sorted(self.images)
         self.gts = sorted(self.gts)
         self.depths=sorted(self.depths)
@@ -106,16 +114,16 @@ class SalObjDataset(data.Dataset):
     def __getitem__(self, index):
         image = self.rgb_loader(self.images[index])
         gt = self.binary_loader(self.gts[index])
-        depth=self.binary_loader(self.depths[index])
-        image,gt,depth =cv_random_flip(image,gt,depth)
-        image,gt,depth=randomCrop(image, gt,depth)
-        image,gt,depth=randomRotation(image, gt,depth)
-        image=colorEnhance(image)
+        depth = self.binary_loader(self.depths[index])
+        image,gt,depth = cv_random_flip(image,gt,depth)
+        image,gt,depth = randomCrop(image, gt,depth)
+        image,gt,depth = randomRotation(image, gt,depth)
+        image = colorEnhance(image)
         # gt=randomGaussian(gt)
-        gt=randomPeper(gt)
+        gt = randomPeper(gt)
         image = self.img_transform(image)
         gt = self.gt_transform(gt)
-        depth=self.depths_transform(depth)
+        depth = self.depths_transform(depth)
         
         return image, gt, depth
 
@@ -124,10 +132,10 @@ class SalObjDataset(data.Dataset):
         images = []
         gts = []
         depths=[]
-        for img_path, gt_path,depth_path in zip(self.images, self.gts, self.depths):
+        for img_path, gt_path, depth_path in zip(self.images, self.gts, self.depths):
             img = Image.open(img_path)
             gt = Image.open(gt_path)
-            depth= Image.open(depth_path)
+            depth = Image.open(depth_path)
             if img.size == gt.size and gt.size==depth.size:
                 images.append(img_path)
                 gts.append(gt_path)

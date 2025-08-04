@@ -1,8 +1,10 @@
 import argparse
+import sys
+
 parser = argparse.ArgumentParser()
-parser.add_argument('--epoch', type=int, default=200, help='epoch number')
+parser.add_argument('--epoch', type=int, default=2, help='epoch number')
 parser.add_argument('--lr', type=float, default=1e-4, help='learning rate')
-parser.add_argument('--batchsize', type=int, default=10, help='training batch size')
+parser.add_argument('--batchsize', type=int, default=4, help='training batch size')
 parser.add_argument('--trainsize', type=int, default=352, help='training dataset size')
 parser.add_argument('--clip', type=float, default=0.5, help='gradient clipping margin')
 parser.add_argument('--decay_rate', type=float, default=0.1, help='decay rate of learning rate')
@@ -16,4 +18,9 @@ parser.add_argument('--test_rgb_root', type=str, default='../BBS_dataset/test_in
 parser.add_argument('--test_depth_root', type=str, default='../BBS_dataset/test_in_train/depth/', help='the test depth images root')
 parser.add_argument('--test_gt_root', type=str, default='../BBS_dataset/test_in_train/GT/', help='the test gt images root')
 parser.add_argument('--save_path', type=str, default='./BBSNet_cpts/', help='the path to save models and logs')
-opt = parser.parse_args()
+
+# ✅ Fix for Jupyter/Colab:
+if 'ipykernel' in sys.modules:
+    opt = parser.parse_args([])  # Ignore unknown args in notebook
+else:
+    opt = parser.parse_args()
