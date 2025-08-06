@@ -9,7 +9,7 @@ parser.add_argument('--trainsize', type=int, default=352, help='training dataset
 parser.add_argument('--clip', type=float, default=0.5, help='gradient clipping margin')
 parser.add_argument('--decay_rate', type=float, default=0.1, help='decay rate of learning rate')
 parser.add_argument('--decay_epoch', type=int, default=60, help='every n epochs decay learning rate')
-parser.add_argument('--load', type=str, default=None, help='train from checkpoints')
+parser.add_argument('--load', type=str, default='/content/drive/My Drive/sod/BBS-Net/BBSNet_cpts/BBSNet_epoch_65.pth', help='train from checkpoints')
 parser.add_argument('--gpu_id', type=str, default='0', help='train use gpu')
 
 # ✅ Paths updated for Colab (Google Drive mount)

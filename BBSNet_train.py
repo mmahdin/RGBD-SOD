@@ -83,6 +83,9 @@ def train(train_loader, model, optimizer, epoch, save_path, CE, total_step):
     epoch_step = 0
     try:
         for i, (images, gts, depths) in enumerate(train_loader, start=1):
+            print(f'input image shape: {images.shape}')
+            print(f'gts shape: {gts.shape}')
+            print(f'depth image shape: {depths.shape}')
             optimizer.zero_grad()
 
             images = images.cuda()
@@ -96,6 +99,7 @@ def train(train_loader, model, optimizer, epoch, save_path, CE, total_step):
             loss.backward()
 
             clip_gradient(optimizer, opt.clip)
+            break
             optimizer.step()
             step += 1
             epoch_step += 1
@@ -106,22 +110,18 @@ def train(train_loader, model, optimizer, epoch, save_path, CE, total_step):
                 logging.info('#TRAIN#:Epoch [{:03d}/{:03d}], Step [{:04d}/{:04d}], Loss1: {:.4f} Loss2: {:0.4f}'.
                              format(epoch, opt.epoch, i, total_step, loss1.data, loss2.data))
                 writer.add_scalar('Loss', loss.data, global_step=step)
-                grid_image = make_grid(
-                    images[0].clone().cpu().data, 1, normalize=True)
+                grid_image = make_grid(images[0].clone().cpu().data, 1, normalize=True)
                 writer.add_image('RGB', grid_image, step)
-                grid_image = make_grid(
-                    gts[0].clone().cpu().data, 1, normalize=True)
+                grid_image = make_grid( gts[0].clone().cpu().data, 1, normalize=True)
                 writer.add_image('Ground_truth', grid_image, step)
                 res = s1[0].clone()
                 res = res.sigmoid().data.cpu().numpy().squeeze()
                 res = (res - res.min()) / (res.max() - res.min() + 1e-8)
-                writer.add_image('s1', torch.tensor(res),
-                                 step, dataformats='HW')
+                writer.add_image('s1', torch.tensor(res),step, dataformats='HW')
                 res = s2[0].clone()
                 res = res.sigmoid().data.cpu().numpy().squeeze()
                 res = (res - res.min()) / (res.max() - res.min() + 1e-8)
-                writer.add_image('s2', torch.tensor(res),
-                                 step, dataformats='HW')
+                writer.add_image('s2', torch.tensor(res), step, dataformats='HW')
 
         loss_all /= epoch_step
         logging.info(
