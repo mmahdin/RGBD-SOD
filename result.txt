@@ -1,0 +1,3 @@
+ECSSD dataset with DSS method get 0.0199 mae, 0.9608 max-fmeasure, 0.9885 max-Emeasure, 0.9304 S-measure..
+ECSSD dataset with DSS method get 0.0199 mae, 0.9608 max-fmeasure, 0.9885 max-Emeasure, 0.9304 S-measure..
+ECSSD dataset with DSS method get 0.0199 mae, 0.9608 max-fmeasure, 0.9885 max-Emeasure, 0.9304 S-measure..
