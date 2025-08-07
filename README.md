@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # BBS-Net
 BBS-Net: RGB-D Salient Object Detection with
 a Bifurcated Backbone Strategy Network

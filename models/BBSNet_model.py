@@ -289,125 +289,83 @@ class BBSNet(nn.Module):
 
     def forward(self, x, x_depth):
         x = self.resnet.conv1(x)
-        print(f"x after conv1: {x.shape}")
         x = self.resnet.bn1(x)
-        print(f"x after bn1: {x.shape}")
         x = self.resnet.relu(x)
-        print(f"x after relu: {x.shape}")
         x = self.resnet.maxpool(x)
-        print(f"x after maxpool: {x.shape}\n")
 
         x_depth = self.resnet_depth.conv1(x_depth)
-        print(f"x_depth after conv1: {x_depth.shape}")
         x_depth = self.resnet_depth.bn1(x_depth)
-        print(f"x_depth after bn1: {x_depth.shape}")
         x_depth = self.resnet_depth.relu(x_depth)
-        print(f"x_depth after relu: {x_depth.shape}")
         x_depth = self.resnet_depth.maxpool(x_depth)
-        print(f"x_depth after maxpool: {x_depth.shape}\n")
 
         # layer0 merge
         temp = x_depth.mul(self.atten_depth_channel_0(x_depth))
-        print(f'atten depth channel: {self.atten_depth_channel_0(x_depth).shape}')
-        print(f'depth mul by channel attention: {temp.shape}')
         temp = temp.mul(self.atten_depth_spatial_0(temp))
-        print(f'atten depth spatial: {self.atten_depth_spatial_0(temp).shape}')
-        print(f'temp mul by spatial attention: {temp.shape}')
         x = x + temp
-        print(f"x after layer0 merge: {x.shape}\n")
         # layer0 merge end
 
         x1 = self.resnet.layer1(x)
-        print(f"x1 after layer1: {x1.shape}")
         x1_depth = self.resnet_depth.layer1(x_depth)
-        print(f"x1_depth after layer1: {x1_depth.shape}\n")
 
         # layer1 merge
         temp = x1_depth.mul(self.atten_depth_channel_1(x1_depth))
         temp = temp.mul(self.atten_depth_spatial_1(temp))
         x1 = x1 + temp
-        print(f"x1 after layer1 merge: {x1.shape}\n")
         # layer1 merge end
 
         x2 = self.resnet.layer2(x1)
-        print(f"x2 after layer2: {x2.shape}")
         x2_depth = self.resnet_depth.layer2(x1_depth)
-        print(f"x2_depth after layer2: {x2_depth.shape}\n")
 
         # layer2 merge
         temp = x2_depth.mul(self.atten_depth_channel_2(x2_depth))
         temp = temp.mul(self.atten_depth_spatial_2(temp))
         x2 = x2 + temp
-        print(f"x2 after layer2 merge: {x2.shape}\n")
         # layer2 merge end
 
         x2_1 = x2
-        print(f"x2_1: {x2_1.shape}\n")
 
         x3_1 = self.resnet.layer3_1(x2_1)
-        print(f"x3_1 after layer3_1: {x3_1.shape}")
         x3_1_depth = self.resnet_depth.layer3_1(x2_depth)
-        print(f"x3_1_depth after layer3_1: {x3_1_depth.shape}\n")
 
         # layer3_1 merge
         temp = x3_1_depth.mul(self.atten_depth_channel_3_1(x3_1_depth))
         temp = temp.mul(self.atten_depth_spatial_3_1(temp))
         x3_1 = x3_1 + temp
-        print(f"x3_1 after layer3_1 merge: {x3_1.shape}\n")
         # layer3_1 merge end
 
         x4_1 = self.resnet.layer4_1(x3_1)
-        print(f"x4_1 after layer4_1: {x4_1.shape}")
         x4_1_depth = self.resnet_depth.layer4_1(x3_1_depth)
-        print(f"x4_1_depth after layer4_1: {x4_1_depth.shape}\n")
 
         # layer4_1 merge
         temp = x4_1_depth.mul(self.atten_depth_channel_4_1(x4_1_depth))
         temp = temp.mul(self.atten_depth_spatial_4_1(temp))
         x4_1 = x4_1 + temp
-        print(f"x4_1 after layer4_1 merge: {x4_1.shape}\n")
         # layer4_1 merge end
 
         # produce initial saliency map by decoder1
         x2_1 = self.rfb2_1(x2_1)
-        print(f"x2_1 after rfb2_1: {x2_1.shape}")
         x3_1 = self.rfb3_1(x3_1)
-        print(f"x3_1 after rfb3_1: {x3_1.shape}")
         x4_1 = self.rfb4_1(x4_1)
-        print(f"x4_1 after rfb4_1: {x4_1.shape}")
         attention_map = self.agg1(x4_1, x3_1, x2_1)
-        print(f"attention_map: {attention_map.shape}\n")
 
         # Refine low-layer features by initial map
         x, x1, x5 = self.HA(attention_map.sigmoid(), x, x1, x2)
-        print(f"x after HA: {x.shape}")
-        print(f"x1 after HA: {x1.shape}")
-        print(f"x5 after HA: {x5.shape}\n")
+
 
         # produce final saliency map by decoder2
         x0_2 = self.rfb0_2(x)
         x1_2 = self.rfb1_2(x1)
         x5_2 = self.rfb5_2(x5)
-        print(f"x0_2: {x0_2.shape}")
-        print(f"x1_2: {x1_2.shape}")
-        print(f"x5_2: {x5_2.shape}\n")
 
         y = self.agg2(x5_2, x1_2, x0_2)
-        print(f"y after agg2: {y.shape}\n")
 
         # PTM module
         y = self.agant1(y)
-        print(f'agant1 shape: {y.shape}')
         y = self.deconv1(y)
-        print(f'deconv1 shape: {y.shape}')
         y = self.agant2(y)
-        print(f'agant2 shape: {y.shape}')
         y = self.deconv2(y)
-        print(f'deconv2 shape: {y.shape}')
         y = self.out2_conv(y)
-        print(f"y after PTM module: {y.shape}\n")
 
-        print(f'\nattention map shape: {self.upsample(attention_map).shape}')
 
         return self.upsample(attention_map), y
 

@@ -99,7 +99,6 @@ def train(train_loader, model, optimizer, epoch, save_path, CE, total_step):
             loss.backward()
 
             clip_gradient(optimizer, opt.clip)
-            break
             optimizer.step()
             step += 1
             epoch_step += 1
