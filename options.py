@@ -9,7 +9,7 @@ parser.add_argument('--trainsize', type=int, default=352, help='training dataset
 parser.add_argument('--clip', type=float, default=0.5, help='gradient clipping margin')
 parser.add_argument('--decay_rate', type=float, default=0.1, help='decay rate of learning rate')
 parser.add_argument('--decay_epoch', type=int, default=60, help='every n epochs decay learning rate')
-parser.add_argument('--load', type=str, default=None, help='train from checkpoints')
+parser.add_argument('--load', type=str, default='./BBSNet_cpts/BBSNet_epoch_best.pth', help='train from checkpoints')
 parser.add_argument('--gpu_id', type=str, default='0', help='train use gpu')
 parser.add_argument('--rgb_root', type=str, default='../BBS_dataset/RGBD_for_train/RGB/', help='the training rgb images root')
 parser.add_argument('--depth_root', type=str, default='../BBS_dataset/RGBD_for_train/depth/', help='the training depth images root')
