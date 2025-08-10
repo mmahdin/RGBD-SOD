@@ -4,6 +4,7 @@ import torch.nn as nn
 import torchvision.models as models
 from models.ResNet import ResNet50
 from torch.nn import functional as F
+import math
 
 
 def conv3x3(in_planes, out_planes, stride=1):
@@ -229,10 +230,91 @@ class Refine(nn.Module):
         return x1, x2, x3
 
 
-class BBSNet(nn.Module):
-    def __init__(self, channel=32):
-        super(BBSNet, self).__init__()
+class TFFBlock(nn.Module):
+    def __init__(self, dim):
+        super(TFFBlock, self).__init__()
+        # RGB projections
+        self.q_rr = nn.Linear(dim, dim)
+        self.q_rt = nn.Linear(dim, dim)
+        self.k_r  = nn.Linear(dim, dim)
+        self.v_r  = nn.Linear(dim, dim)
+        
+        # Depth projections
+        self.q_tt = nn.Linear(dim, dim)
+        self.q_tr = nn.Linear(dim, dim)
+        self.k_t  = nn.Linear(dim, dim)
+        self.v_t  = nn.Linear(dim, dim)
+        
+        # MLP head
+        self.mlp = nn.Sequential(
+            nn.Linear(dim, dim * 4),
+            nn.ReLU(inplace=True),
+            nn.Linear(dim * 4, dim)
+        )
+        
+        self.scale = math.sqrt(dim)
 
+    def _attention(self, Q, K, V):
+        """
+        Computes scaled dot-product attention:
+        Softmax(QK^T / sqrt(d)) V
+        Q, K, V: [B, N, C]
+        Returns: [B, N, C]
+        """
+        attn = torch.softmax((Q @ K.transpose(-2, -1)) / self.scale, dim=-1)
+        return attn @ V
+
+    def forward(self, R, T):
+        """
+        R, T: [B, C, H, W]
+        """
+        B, C, H, W = R.shape
+        N = H * W
+        
+        # Flatten spatial dims
+        R_flat = R.permute(0, 2, 3, 1).reshape(B, N, C)
+        T_flat = T.permute(0, 2, 3, 1).reshape(B, N, C)
+        
+        # Project RGB
+        Q_rr = self.q_rr(R_flat)
+        Q_rt = self.q_rt(R_flat)
+        K_r  = self.k_r(R_flat)
+        V_r  = self.v_r(R_flat)
+        
+        # Project Depth
+        Q_tt = self.q_tt(T_flat)
+        Q_tr = self.q_tr(T_flat)
+        K_t  = self.k_t(T_flat)
+        V_t  = self.v_t(T_flat)
+        
+        # Self-attention
+        A_rr = self._attention(Q_rr, K_r, V_r)
+        A_tt = self._attention(Q_tt, K_t, V_t)
+        SA = A_rr + A_tt
+        
+        # Cross-attention
+        A_rt = self._attention(Q_rt, K_t, V_t)
+        A_tr = self._attention(Q_tr, K_r, V_r)
+        CA = A_rt + A_tr
+        
+        # Eq. (3): O_i
+        O = SA + CA + R_flat
+        
+        # Eq. (4): M_i
+        M = self.mlp(O)
+        
+        # Eq. (5): F_i
+        F = R_flat + M
+        
+        # Reshape back to [B, C, H, W]
+        return F.reshape(B, H, W, C).permute(0, 3, 1, 2)
+
+
+
+class BaseModel(nn.Module):
+    def __init__(self, channel=32):
+        super().__init__()
+        
         # Backbone model
         self.resnet = ResNet50('rgb')
         self.resnet_depth = ResNet50('rgbd')
@@ -260,6 +342,164 @@ class BBSNet(nn.Module):
         # Refinement flow
         self.HA = Refine()
 
+        # Components of PTM module
+        self.inplanes = 32*2
+        self.deconv1 = self._make_transpose(TransBasicBlock, 32*2, 3, stride=2)
+        self.inplanes = 32
+        self.deconv2 = self._make_transpose(TransBasicBlock, 32, 3, stride=2)
+        self.agant1 = self._make_agant_layer(32*3, 32*2)
+        self.agant2 = self._make_agant_layer(32*2, 32)
+        self.out0_conv = nn.Conv2d(32*3, 1, kernel_size=1, stride=1, bias=True)
+        self.out1_conv = nn.Conv2d(32*2, 1, kernel_size=1, stride=1, bias=True)
+        self.out2_conv = nn.Conv2d(32*1, 1, kernel_size=1, stride=1, bias=True)
+    
+    def _make_agant_layer(self, inplanes, planes):
+        layers = nn.Sequential(
+            nn.Conv2d(inplanes, planes, kernel_size=1,
+                      stride=1, padding=0, bias=False),
+            nn.BatchNorm2d(planes),
+            nn.ReLU(inplace=True)
+        )
+        return layers
+
+    def _make_transpose(self, block, planes, blocks, stride=1):
+        upsample = None
+        if stride != 1:
+            upsample = nn.Sequential(
+                nn.ConvTranspose2d(self.inplanes, planes,
+                                   kernel_size=2, stride=stride,
+                                   padding=0, bias=False),
+                nn.BatchNorm2d(planes),
+            )
+        elif self.inplanes != planes:
+            upsample = nn.Sequential(
+                nn.Conv2d(self.inplanes, planes,
+                          kernel_size=1, stride=stride, bias=False),
+                nn.BatchNorm2d(planes),
+            )
+
+        layers = []
+
+        for i in range(1, blocks):
+            layers.append(block(self.inplanes, self.inplanes))
+
+        layers.append(block(self.inplanes, planes, stride, upsample))
+        self.inplanes = planes
+
+        return nn.Sequential(*layers)
+
+    # initialize the weights
+    def initialize_weights(self):
+        res50 = resnet50(weights=ResNet50_Weights.IMAGENET1K_V1)
+        pretrained_dict = res50.state_dict()
+        all_params = {}
+        for k, v in self.resnet.state_dict().items():
+            if k in pretrained_dict.keys():
+                v = pretrained_dict[k]
+                all_params[k] = v
+            elif '_1' in k:
+                name = k.split('_1')[0] + k.split('_1')[1]
+                v = pretrained_dict[name]
+                all_params[k] = v
+            elif '_2' in k:
+                name = k.split('_2')[0] + k.split('_2')[1]
+                v = pretrained_dict[name]
+                all_params[k] = v
+        assert len(all_params.keys()) == len(self.resnet.state_dict().keys())
+        self.resnet.load_state_dict(all_params)
+
+        all_params = {}
+        for k, v in self.resnet_depth.state_dict().items():
+            if k == 'conv1.weight':
+                all_params[k] = torch.nn.init.normal_(v, mean=0, std=1)
+            elif k in pretrained_dict.keys():
+                v = pretrained_dict[k]
+                all_params[k] = v
+            elif '_1' in k:
+                name = k.split('_1')[0] + k.split('_1')[1]
+                v = pretrained_dict[name]
+                all_params[k] = v
+            elif '_2' in k:
+                name = k.split('_2')[0] + k.split('_2')[1]
+                v = pretrained_dict[name]
+                all_params[k] = v
+        assert len(all_params.keys()) == len(
+            self.resnet_depth.state_dict().keys())
+        self.resnet_depth.load_state_dict(all_params)
+
+
+class BBSNetTransformerAttention(BaseModel):
+    def __init__(self):
+        super().__init__()
+
+        # TFF modules per stage
+        self.tff0 = TFFBlock(64)
+        self.tff1 = TFFBlock(256)
+        self.tff2 = TFFBlock(512)
+        self.tff3_1 = TFFBlock(1024)
+        self.tff4_1 = TFFBlock(2048)
+
+        if self.training:
+            self.initialize_weights()
+
+    def forward(self, x, x_depth):
+        # Stage 0
+        x = self.resnet.maxpool(self.resnet.relu(self.resnet.bn1(self.resnet.conv1(x))))
+        x_depth = self.resnet_depth.maxpool(self.resnet_depth.relu(self.resnet_depth.bn1(self.resnet_depth.conv1(x_depth))))
+        x = self.tff0(x, x_depth) + x
+        
+        # Stage 1
+        x1 = self.resnet.layer1(x)
+        x1_depth = self.resnet_depth.layer1(x_depth)
+        x1 = self.tff1(x1, x1_depth) + x1
+        
+        # Stage 2
+        x2 = self.resnet.layer2(x1)
+        x2_depth = self.resnet_depth.layer2(x1_depth)
+        x2 = self.tff2(x2, x2_depth) + x2
+        
+        # Stage 3_1
+        x3_1 = self.resnet.layer3_1(x2)
+        x3_1_depth = self.resnet_depth.layer3_1(x2_depth)
+        x3_1 = self.tff3_1(x3_1, x3_1_depth) + x3_1
+        
+        # Stage 4_1
+        x4_1 = self.resnet.layer4_1(x3_1)
+        x4_1_depth = self.resnet_depth.layer4_1(x3_1_depth)
+        x4_1 = self.tff4_1(x4_1, x4_1_depth) + x4_1
+
+        # produce initial saliency map by decoder1
+        x2_1 = self.rfb2_1(x2_1)
+        x3_1 = self.rfb3_1(x3_1)
+        x4_1 = self.rfb4_1(x4_1)
+        attention_map = self.agg1(x4_1, x3_1, x2_1)
+
+        # Refine low-layer features by initial map
+        x, x1, x5 = self.HA(attention_map.sigmoid(), x, x1, x2)
+
+
+        # produce final saliency map by decoder2
+        x0_2 = self.rfb0_2(x)
+        x1_2 = self.rfb1_2(x1)
+        x5_2 = self.rfb5_2(x5)
+
+        y = self.agg2(x5_2, x1_2, x0_2)
+
+        # PTM module
+        y = self.agant1(y)
+        y = self.deconv1(y)
+        y = self.agant2(y)
+        y = self.deconv2(y)
+        y = self.out2_conv(y)
+
+
+        return self.upsample(attention_map), y
+
+
+class BBSNetChannelSpatialAttention(BaseModel):
+    def __init__(self):
+        super().__init__()
+
         # Components of DEM module
         self.atten_depth_channel_0 = ChannelAttention(64)
         self.atten_depth_channel_1 = ChannelAttention(256)
@@ -272,17 +512,6 @@ class BBSNet(nn.Module):
         self.atten_depth_spatial_2 = SpatialAttention()
         self.atten_depth_spatial_3_1 = SpatialAttention()
         self.atten_depth_spatial_4_1 = SpatialAttention()
-
-        # Components of PTM module
-        self.inplanes = 32*2
-        self.deconv1 = self._make_transpose(TransBasicBlock, 32*2, 3, stride=2)
-        self.inplanes = 32
-        self.deconv2 = self._make_transpose(TransBasicBlock, 32, 3, stride=2)
-        self.agant1 = self._make_agant_layer(32*3, 32*2)
-        self.agant2 = self._make_agant_layer(32*2, 32)
-        self.out0_conv = nn.Conv2d(32*3, 1, kernel_size=1, stride=1, bias=True)
-        self.out1_conv = nn.Conv2d(32*2, 1, kernel_size=1, stride=1, bias=True)
-        self.out2_conv = nn.Conv2d(32*1, 1, kernel_size=1, stride=1, bias=True)
 
         if self.training:
             self.initialize_weights()
@@ -368,78 +597,3 @@ class BBSNet(nn.Module):
 
 
         return self.upsample(attention_map), y
-
-
-    def _make_agant_layer(self, inplanes, planes):
-        layers = nn.Sequential(
-            nn.Conv2d(inplanes, planes, kernel_size=1,
-                      stride=1, padding=0, bias=False),
-            nn.BatchNorm2d(planes),
-            nn.ReLU(inplace=True)
-        )
-        return layers
-
-    def _make_transpose(self, block, planes, blocks, stride=1):
-        upsample = None
-        if stride != 1:
-            upsample = nn.Sequential(
-                nn.ConvTranspose2d(self.inplanes, planes,
-                                   kernel_size=2, stride=stride,
-                                   padding=0, bias=False),
-                nn.BatchNorm2d(planes),
-            )
-        elif self.inplanes != planes:
-            upsample = nn.Sequential(
-                nn.Conv2d(self.inplanes, planes,
-                          kernel_size=1, stride=stride, bias=False),
-                nn.BatchNorm2d(planes),
-            )
-
-        layers = []
-
-        for i in range(1, blocks):
-            layers.append(block(self.inplanes, self.inplanes))
-
-        layers.append(block(self.inplanes, planes, stride, upsample))
-        self.inplanes = planes
-
-        return nn.Sequential(*layers)
-
-    # initialize the weights
-    def initialize_weights(self):
-        res50 = resnet50(weights=ResNet50_Weights.IMAGENET1K_V1)
-        pretrained_dict = res50.state_dict()
-        all_params = {}
-        for k, v in self.resnet.state_dict().items():
-            if k in pretrained_dict.keys():
-                v = pretrained_dict[k]
-                all_params[k] = v
-            elif '_1' in k:
-                name = k.split('_1')[0] + k.split('_1')[1]
-                v = pretrained_dict[name]
-                all_params[k] = v
-            elif '_2' in k:
-                name = k.split('_2')[0] + k.split('_2')[1]
-                v = pretrained_dict[name]
-                all_params[k] = v
-        assert len(all_params.keys()) == len(self.resnet.state_dict().keys())
-        self.resnet.load_state_dict(all_params)
-
-        all_params = {}
-        for k, v in self.resnet_depth.state_dict().items():
-            if k == 'conv1.weight':
-                all_params[k] = torch.nn.init.normal_(v, mean=0, std=1)
-            elif k in pretrained_dict.keys():
-                v = pretrained_dict[k]
-                all_params[k] = v
-            elif '_1' in k:
-                name = k.split('_1')[0] + k.split('_1')[1]
-                v = pretrained_dict[name]
-                all_params[k] = v
-            elif '_2' in k:
-                name = k.split('_2')[0] + k.split('_2')[1]
-                v = pretrained_dict[name]
-                all_params[k] = v
-        assert len(all_params.keys()) == len(
-            self.resnet_depth.state_dict().keys())
-        self.resnet_depth.load_state_dict(all_params)

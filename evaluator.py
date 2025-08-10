@@ -237,8 +237,6 @@ class Eval_thread():
                     x = pred.mean()
                     Q = x
                 else:
-                    # gt[gt>=0.5] = 1
-                    # gt[gt<0.5] = 0
                     Q = alpha * self._S_object(pred, gt) + (1-alpha) * self._S_region(pred, gt)
                     if Q.item() < 0:
                         Q = torch.FloatTensor([0.0])
@@ -281,6 +279,7 @@ class Eval_thread():
             score[i] = torch.sum(enhanced) / (y.numel() - 1 + 1e-20)
 
         return score
+    
     def _eval_adp_e(self, y_pred, y):
         th=y_pred.mean() * 2
         y_pred_th=(y_pred >= th).float()
@@ -296,7 +295,6 @@ class Eval_thread():
             enhanced = ((align_matrix + 1) * (align_matrix + 1)) / 4
         return torch.sum(enhanced) / (y.numel() - 1 + 1e-20)
 
-
     def _eval_pr(self, y_pred, y, num):
         if self.cuda:
             prec, recall = torch.zeros(num).cuda(), torch.zeros(num).cuda()
@@ -310,6 +308,7 @@ class Eval_thread():
             prec[i], recall[i] = tp / (y_temp.sum() + 1e-20), tp / (y.sum() + 1e-20)
 
         return prec, recall
+    
     def _eval_adp_f_measure(self,y_pred,y):
         beta2=0.3
         thr=y_pred.mean()*2
