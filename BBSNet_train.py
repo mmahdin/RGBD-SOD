@@ -4,7 +4,8 @@ import torch.backends.cudnn as cudnn
 import logging
 from tensorboardX import SummaryWriter
 from utils import clip_gradient, adjust_lr
-from models.BBSNet_model import BBSNetChannelSpatialAttention as BBSNet 
+# from models.BBSNet_model import BBSNetChannelSpatialAttention as BBSNet 
+from models.BBSNet_model import BBSNetTransformerAttention as BBSNet
 from torchvision.utils import make_grid
 from datetime import datetime
 import numpy as np
@@ -83,9 +84,6 @@ def train(train_loader, model, optimizer, epoch, save_path, CE, total_step):
     epoch_step = 0
     try:
         for i, (images, gts, depths) in enumerate(train_loader, start=1):
-            print(f'input image shape: {images.shape}')
-            print(f'gts shape: {gts.shape}')
-            print(f'depth image shape: {depths.shape}')
             optimizer.zero_grad()
 
             images = images.cuda()

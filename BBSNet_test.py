@@ -4,7 +4,8 @@ import sys
 import numpy as np
 import os, argparse
 import cv2
-from models.BBSNet_model import BBSNetChannelSpatialAttention as BBSNet
+# from models.BBSNet_model import BBSNetChannelSpatialAttention as BBSNet
+from models.BBSNet_model import BBSNetTransformerAttention as BBSNet
 from data import test_dataset
 
 def test(method='BBSNetChannelSpatialAttention'):

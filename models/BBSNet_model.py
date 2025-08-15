@@ -469,7 +469,7 @@ class BBSNetTransformerAttention(BaseModel):
         x4_1 = self.tff4_1(x4_1, x4_1_depth) + x4_1
 
         # produce initial saliency map by decoder1
-        x2_1 = self.rfb2_1(x2_1)
+        x2_1 = self.rfb2_1(x2)
         x3_1 = self.rfb3_1(x3_1)
         x4_1 = self.rfb4_1(x4_1)
         attention_map = self.agg1(x4_1, x3_1, x2_1)

@@ -54,6 +54,7 @@ def main(cfg):
     for thread in threads:
         print(thread.run())
 
+
 def evaluate():
     pred_root_dir = './pred/'
     gt_root_dir = './gt/'

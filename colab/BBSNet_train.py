@@ -4,7 +4,8 @@ import torch.backends.cudnn as cudnn
 import logging
 from tensorboardX import SummaryWriter
 from utils import clip_gradient, adjust_lr
-from models.BBSNet_model import BBSNet
+# from models.BBSNet_model import BBSNetChannelSpatialAttention as BBSNet 
+from models.BBSNet_model import BBSNetTransformerAttention as BBSNet
 from torchvision.utils import make_grid
 from datetime import datetime
 import numpy as np
@@ -118,8 +119,8 @@ def train(train_loader, model, optimizer, epoch, save_path):
         logging.info(
             '#TRAIN#:Epoch [{:03d}/{:03d}], Loss_AVG: {:.4f}'.format(epoch, opt.epoch, loss_all))
         writer.add_scalar('Loss-epoch', loss_all, global_step=epoch)
-        if (epoch) % 5 == 0:
-            torch.save(model.state_dict(), save_path +
+        # if (epoch) % 5 == 0:
+        torch.save(model.state_dict(), save_path +
                        'BBSNet_epoch_{}.pth'.format(epoch))
     except KeyboardInterrupt:
         print('Keyboard Interrupt: save model and exit.')
