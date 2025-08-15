@@ -311,6 +311,270 @@ class TFFBlock(nn.Module):
 
 
 
+# =========================
+# Attention Blocks
+# =========================
+class SelfAttn2d(nn.Module):
+    def __init__(self, in_channels, num_heads=4, max_proj=256, dropout=0.0):
+        super().__init__()
+        d_model = min(in_channels, max_proj)
+        self.proj_in = nn.Conv2d(in_channels, d_model, kernel_size=1, bias=True)
+        self.proj_out = nn.Conv2d(d_model, in_channels, kernel_size=1, bias=True)
+
+        self.mha = nn.MultiheadAttention(d_model, num_heads, dropout=dropout, batch_first=True)
+        self.pos = PositionalEncoding2D(d_model)
+        self.norm1 = nn.LayerNorm(d_model)
+        self.norm2 = nn.LayerNorm(d_model)
+
+        self.ffn = nn.Sequential(
+            nn.Linear(d_model, d_model * 2),
+            nn.GELU(),
+            nn.Linear(d_model * 2, d_model),
+        )
+        self.gamma_attn = nn.Parameter(torch.zeros(1))
+        self.gamma_ffn = nn.Parameter(torch.zeros(1))
+
+        self.mlp_spatial = ConvMLP(in_channels, hidden_ratio=2.0)  # optional local mixing
+
+    def forward(self, x):
+        """
+        x: (B, C, H, W)
+        """
+        B, C, H, W = x.shape
+        tokens, (H, W) = _to_tokens(x, self.proj_in, self.pos)   # (B, L, D)
+        # Self Attention
+        y = self.norm1(tokens)
+        y, _ = self.mha(y, y, y, need_weights=False)
+        tokens = tokens + self.gamma_attn * y
+        # FFN
+        y2 = self.norm2(tokens)
+        y2 = self.ffn(y2)
+        tokens = tokens + self.gamma_ffn * y2
+
+        out = _from_tokens(tokens, H, W, self.proj_out)  # (B, C, H, W)
+        out = self.mlp_spatial(out)                      # extra local mixing
+        return out
+
+
+class CrossAttn2d(nn.Module):
+    def __init__(self, in_channels, num_heads=4, max_proj=256, dropout=0.0):
+        super().__init__()
+        d_model = min(in_channels, max_proj)
+        self.q_proj = nn.Conv2d(in_channels, d_model, kernel_size=1, bias=True)
+        self.kv_proj = nn.Conv2d(in_channels, d_model, kernel_size=1, bias=True)
+        self.out_proj = nn.Conv2d(d_model, in_channels, kernel_size=1, bias=True)
+
+        self.mha = nn.MultiheadAttention(d_model, num_heads, dropout=dropout, batch_first=True)
+        self.pos_q = PositionalEncoding2D(d_model)
+        self.pos_kv = PositionalEncoding2D(d_model)
+        self.norm_q = nn.LayerNorm(d_model)
+        self.norm_kv = nn.LayerNorm(d_model)
+        self.norm_ffn = nn.LayerNorm(d_model)
+
+        self.ffn = nn.Sequential(
+            nn.Linear(d_model, d_model * 2),
+            nn.GELU(),
+            nn.Linear(d_model * 2, d_model),
+        )
+        self.gamma_attn = nn.Parameter(torch.zeros(1))
+        self.gamma_ffn = nn.Parameter(torch.zeros(1))
+
+    def forward(self, query_x, context_x):
+        """
+        query_x attends to context_x.
+        Inputs: (B, C, H, W)
+        Returns updated query_x with same shape.
+        """
+        B, C, H, W = query_x.shape
+
+        q_tokens, (H, W) = _to_tokens(query_x, self.q_proj, self.pos_q)      # (B, Lq, D)
+        kv_tokens, _ = _to_tokens(context_x, self.kv_proj, self.pos_kv)      # (B, Lk, D)
+
+        qn = self.norm_q(q_tokens)
+        kvn = self.norm_kv(kv_tokens)
+
+        y, _ = self.mha(qn, kvn, kvn, need_weights=False)
+        q_tokens = q_tokens + self.gamma_attn * y
+
+        y2 = self.norm_ffn(q_tokens)
+        y2 = self.ffn(y2)
+        q_tokens = q_tokens + self.gamma_ffn * y2
+
+        out = _from_tokens(q_tokens, H, W, self.out_proj)  # (B, C, H, W)
+        return out
+
+
+class FusionBlock2D(nn.Module):
+    """
+    Self-attention for each modality + cross-attention both ways.
+    Returns updated (rgb, depth).
+    """
+    def __init__(self, channels, num_heads=4, max_proj=256, dropout=0.0):
+        super().__init__()
+        self.self_rgb = SelfAttn2d(channels, num_heads=num_heads, max_proj=max_proj, dropout=dropout)
+        self.self_dep = SelfAttn2d(channels, num_heads=num_heads, max_proj=max_proj, dropout=dropout)
+
+        self.cross_rgb_from_dep = CrossAttn2d(channels, num_heads=num_heads, max_proj=max_proj, dropout=dropout)
+        self.cross_dep_from_rgb = CrossAttn2d(channels, num_heads=num_heads, max_proj=max_proj, dropout=dropout)
+
+        # Gated residual merge
+        self.gate_rgb = nn.Sequential(
+            nn.Conv2d(channels * 2, channels, kernel_size=1, bias=True),
+            nn.GELU(),
+            nn.Conv2d(channels, channels, kernel_size=1, bias=True),
+            nn.Sigmoid()
+        )
+        self.gate_dep = nn.Sequential(
+            nn.Conv2d(channels * 2, channels, kernel_size=1, bias=True),
+            nn.GELU(),
+            nn.Conv2d(channels, channels, kernel_size=1, bias=True),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x_rgb, x_dep):
+        # 1) self-attention refinement
+        r = self.self_rgb(x_rgb)
+        d = self.self_dep(x_dep)
+        # 2) cross attention (bi-directional)
+        r_cross = self.cross_rgb_from_dep(r, d)
+        d_cross = self.cross_dep_from_rgb(d, r)
+        # 3) gated residual blend
+        g_r = self.gate_rgb(torch.cat([r, r_cross], dim=1))
+        g_d = self.gate_dep(torch.cat([d, d_cross], dim=1))
+        out_r = r + g_r * r_cross
+        out_d = d + g_d * d_cross
+        return out_r, out_d
+
+
+# =========================
+# Positional Encoding (2D)
+# =========================
+class PositionalEncoding2D(nn.Module):
+    """
+    Sine-cosine 2D positional encoding that maps (H, W) into d_model.
+    Adapted to work with channels-last token embeddings in attention.
+    """
+    def __init__(self, d_model: int):
+        super().__init__()
+        self.d_model = d_model
+        # keep a cache by size to avoid recomputing
+        self.register_buffer("_cached", torch.zeros(1), persistent=False)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        x: (B, L, D) where L = H*W and D = d_model
+        We assume tokens were created by flattening H*W with row-major order.
+        """
+        B, L, D = x.shape
+        d_model = D
+        # Infer H and W heuristically: prefer square-ish (assumes caller uses consistent H, W)
+        H = W = int(math.sqrt(L))
+        if H * W != L:
+            # fallback: assume the caller provided (B, C, H, W) before flatten and tracked H, W
+            # If you want explicit H,W passing, add it to the module signature.
+            H = L
+            W = 1
+
+        device = x.device
+        # Cache key
+        key = (H, W, d_model)
+        if (not isinstance(self._cached, torch.Tensor)) or self._cached.numel() == 1:
+            self._cache = {}
+            self._cached = torch.zeros(2, device=device)  # just a non-empty tensor
+
+        if key in getattr(self, "_cache", {}):
+            pe = self._cache[key]
+            if pe.device != device:
+                pe = pe.to(device)
+                self._cache[key] = pe
+        else:
+            pe = self._build_pe(H, W, d_model, device)  # (H*W, D)
+            if not hasattr(self, "_cache"):
+                self._cache = {}
+            self._cache[key] = pe
+
+        pe = pe.unsqueeze(0).expand(B, -1, -1)  # (B, L, D)
+        return x + pe
+
+    @staticmethod
+    def _build_pe(H: int, W: int, d_model: int, device) -> torch.Tensor:
+        """
+        Classic 2D sine-cosine split: half dims for H, half for W (even d_model).
+        """
+        if d_model % 2 != 0:
+            # make even by dropping last dim if needed
+            d_model = d_model - 1
+        half = d_model // 2
+        # positions
+        y = torch.arange(H, device=device).float()
+        x = torch.arange(W, device=device).float()
+        yy, xx = torch.meshgrid(y, x, indexing="ij")  # (H, W)
+
+        # frequencies
+        div_term_y = torch.exp(torch.arange(0, half, 2, device=device).float() * (-math.log(10000.0) / half))
+        div_term_x = torch.exp(torch.arange(0, half, 2, device=device).float() * (-math.log(10000.0) / half))
+
+        pe_y = torch.zeros(H, W, half, device=device)
+        pe_x = torch.zeros(H, W, half, device=device)
+
+        pe_y[..., 0::2] = torch.sin(yy[..., None] * div_term_y)
+        pe_y[..., 1::2] = torch.cos(yy[..., None] * div_term_y)
+
+        pe_x[..., 0::2] = torch.sin(xx[..., None] * div_term_x)
+        pe_x[..., 1::2] = torch.cos(xx[..., None] * div_term_x)
+
+        pe = torch.cat([pe_y, pe_x], dim=-1)  # (H, W, D)
+        if pe.shape[-1] + 1 == d_model + 1:  # if we dropped a dim
+            pass
+        pe = pe.view(H * W, -1)  # (L, D)
+        # If original D was odd, pad one zero
+        if pe.shape[-1] % 2 == 1:
+            pe = F.pad(pe, (0,1))
+        return pe
+
+
+# =========================
+# Helpers
+# =========================
+class ConvMLP(nn.Module):
+    """Lightweight 1x1-Conv MLP with GELU and residual gate."""
+    def __init__(self, channels, hidden_ratio=2.0):
+        super().__init__()
+        hidden = max(4, int(channels * hidden_ratio))
+        self.net = nn.Sequential(
+            nn.Conv2d(channels, hidden, kernel_size=1, bias=True),
+            nn.GELU(),
+            nn.Conv2d(hidden, channels, kernel_size=1, bias=True),
+        )
+        self.gamma = nn.Parameter(torch.zeros(1))  # residual scale
+
+    def forward(self, x):
+        return x + self.gamma * self.net(x)
+
+
+def _to_tokens(x, proj, posenc: PositionalEncoding2D):
+    """
+    x: (B, C, H, W) -> tokens: (B, L, D)
+    """
+    B, C, H, W = x.shape
+    y = proj(x)                        # (B, D, H, W)
+    y = y.flatten(2).transpose(1, 2)   # (B, L, D)
+    y = posenc(y)
+    return y, (H, W)
+
+
+def _from_tokens(tokens, H, W, out_proj):
+    """
+    tokens: (B, L, D) -> (B, C, H, W)
+    """
+    B, L, D = tokens.shape
+    y = tokens.transpose(1, 2).view(B, D, H, W)  # (B, D, H, W)
+    y = out_proj(y)                              # (B, C, H, W)
+    return y
+
+
+
+
 class BaseModel(nn.Module):
     def __init__(self, channel=32):
         super().__init__()
@@ -428,74 +692,6 @@ class BaseModel(nn.Module):
         self.resnet_depth.load_state_dict(all_params)
 
 
-class BBSNetTransformerAttention(BaseModel):
-    def __init__(self):
-        super().__init__()
-
-        # TFF modules per stage
-        self.tff0 = TFFBlock(64)
-        self.tff1 = TFFBlock(256)
-        self.tff2 = TFFBlock(512)
-        self.tff3_1 = TFFBlock(1024)
-        self.tff4_1 = TFFBlock(2048)
-
-        if self.training:
-            self.initialize_weights()
-
-    def forward(self, x, x_depth):
-        # Stage 0
-        x = self.resnet.maxpool(self.resnet.relu(self.resnet.bn1(self.resnet.conv1(x))))
-        x_depth = self.resnet_depth.maxpool(self.resnet_depth.relu(self.resnet_depth.bn1(self.resnet_depth.conv1(x_depth))))
-        x = self.tff0(x, x_depth) + x
-        
-        # Stage 1
-        x1 = self.resnet.layer1(x)
-        x1_depth = self.resnet_depth.layer1(x_depth)
-        x1 = self.tff1(x1, x1_depth) + x1
-        
-        # Stage 2
-        x2 = self.resnet.layer2(x1)
-        x2_depth = self.resnet_depth.layer2(x1_depth)
-        x2 = self.tff2(x2, x2_depth) + x2
-        
-        # Stage 3_1
-        x3_1 = self.resnet.layer3_1(x2)
-        x3_1_depth = self.resnet_depth.layer3_1(x2_depth)
-        x3_1 = self.tff3_1(x3_1, x3_1_depth) + x3_1
-        
-        # Stage 4_1
-        x4_1 = self.resnet.layer4_1(x3_1)
-        x4_1_depth = self.resnet_depth.layer4_1(x3_1_depth)
-        x4_1 = self.tff4_1(x4_1, x4_1_depth) + x4_1
-
-        # produce initial saliency map by decoder1
-        x2_1 = self.rfb2_1(x2)
-        x3_1 = self.rfb3_1(x3_1)
-        x4_1 = self.rfb4_1(x4_1)
-        attention_map = self.agg1(x4_1, x3_1, x2_1)
-
-        # Refine low-layer features by initial map
-        x, x1, x5 = self.HA(attention_map.sigmoid(), x, x1, x2)
-
-
-        # produce final saliency map by decoder2
-        x0_2 = self.rfb0_2(x)
-        x1_2 = self.rfb1_2(x1)
-        x5_2 = self.rfb5_2(x5)
-
-        y = self.agg2(x5_2, x1_2, x0_2)
-
-        # PTM module
-        y = self.agant1(y)
-        y = self.deconv1(y)
-        y = self.agant2(y)
-        y = self.deconv2(y)
-        y = self.out2_conv(y)
-
-
-        return self.upsample(attention_map), y
-
-
 class BBSNetChannelSpatialAttention(BaseModel):
     def __init__(self):
         super().__init__()
@@ -597,3 +793,99 @@ class BBSNetChannelSpatialAttention(BaseModel):
 
 
         return self.upsample(attention_map), y
+
+
+
+class BBSNetTransformerAttention(BaseModel):
+    def __init__(self):
+        super().__init__()
+
+        # TFF modules per stage
+        dropout = 0.1
+
+        heads_stage=(4, 4, 8, 8, 8)
+        maxproj_stage=(128, 192, 256, 256, 256)
+        C = [64, 256, 512, 1024, 2048]
+
+        # TFF modules per stage
+        self.fuse0   = FusionBlock2D(C[0], num_heads=heads_stage[0], max_proj=maxproj_stage[0], dropout=dropout)
+        self.fuse1   = FusionBlock2D(C[1], num_heads=heads_stage[1], max_proj=maxproj_stage[1], dropout=dropout)
+        self.fuse2   = FusionBlock2D(C[2], num_heads=heads_stage[2], max_proj=maxproj_stage[2], dropout=dropout)
+        self.fuse3_1 = FusionBlock2D(C[3], num_heads=heads_stage[3], max_proj=maxproj_stage[3], dropout=dropout)
+        self.fuse4_1 = FusionBlock2D(C[4], num_heads=heads_stage[4], max_proj=maxproj_stage[4], dropout=dropout)
+
+        if self.training:
+            self.initialize_weights()
+
+    def forward(self, x, x_depth):
+        # stem
+        x = self.resnet.conv1(x)
+        x = self.resnet.bn1(x)
+        x = self.resnet.relu(x)
+        x = self.resnet.maxpool(x)
+
+        x_depth = self.resnet_depth.conv1(x_depth)
+        x_depth = self.resnet_depth.bn1(x_depth)
+        x_depth = self.resnet_depth.relu(x_depth)
+        x_depth = self.resnet_depth.maxpool(x_depth)
+
+        # ---- layer0 fusion (64ch) ----
+        x, x_depth = self.fuse0(x, x_depth)
+
+        # layer1
+        x1 = self.resnet.layer1(x)              # (B, 256, H/4, W/4) typical
+        x1_depth = self.resnet_depth.layer1(x_depth)
+
+        # ---- layer1 fusion (256ch) ----
+        x1, x1_depth = self.fuse1(x1, x1_depth)
+
+        # layer2
+        x2 = self.resnet.layer2(x1)             # (B, 512, H/8, W/8)
+        x2_depth = self.resnet_depth.layer2(x1_depth)
+
+        # ---- layer2 fusion (512ch) ----
+        x2, x2_depth = self.fuse2(x2, x2_depth)
+
+        # layer3_1
+        x3_1 = self.resnet.layer3_1(x2)         # (B, 1024, H/16, W/16) depending on your impl
+        x3_1_depth = self.resnet_depth.layer3_1(x2_depth)
+
+        # ---- layer3_1 fusion (1024ch) ----
+        x3_1, x3_1_depth = self.fuse3_1(x3_1, x3_1_depth)
+
+        # layer4_1
+        x4_1 = self.resnet.layer4_1(x3_1)       # (B, 2048, H/32, W/32)
+        x4_1_depth = self.resnet_depth.layer4_1(x3_1_depth)
+
+        # ---- layer4_1 fusion (2048ch) ----
+        x4_1, x4_1_depth = self.fuse4_1(x4_1, x4_1_depth)
+
+        # produce initial saliency map by decoder1
+        x2_1 = self.rfb2_1(x2)
+        x3_1 = self.rfb3_1(x3_1)
+        x4_1 = self.rfb4_1(x4_1)
+        attention_map = self.agg1(x4_1, x3_1, x2_1)
+
+        # Refine low-layer features by initial map
+        x, x1, x5 = self.HA(attention_map.sigmoid(), x, x1, x2)
+
+
+        # produce final saliency map by decoder2
+        x0_2 = self.rfb0_2(x)
+        x1_2 = self.rfb1_2(x1)
+        x5_2 = self.rfb5_2(x5)
+
+        y = self.agg2(x5_2, x1_2, x0_2)
+
+        # PTM module
+        y = self.agant1(y)
+        y = self.deconv1(y)
+        y = self.agant2(y)
+        y = self.deconv2(y)
+        y = self.out2_conv(y)
+
+
+        return self.upsample(attention_map), y
+
+
+
