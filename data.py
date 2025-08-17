@@ -97,9 +97,10 @@ class SalObjDataset(data.Dataset):
         self.images = [image_root + f for f in os.listdir(image_root) if f.endswith('.jpg')]
         self.gts = [gt_root + f for f in os.listdir(gt_root) if f.endswith('.jpg') or f.endswith('.png')]
         self.depths=[depth_root + f for f in os.listdir(depth_root) if f.endswith('.bmp') or f.endswith('.png')]
-        self.images = sorted(self.images)
-        self.gts = sorted(self.gts)
-        self.depths=sorted(self.depths)
+        num = 10
+        self.images = sorted(self.images)[:num]
+        self.gts = sorted(self.gts)[:num]
+        self.depths = sorted(self.depths)[:num]
         self.filter_files()
         self.size = len(self.images)
         self.img_transform = transforms.Compose([
@@ -140,6 +141,7 @@ class SalObjDataset(data.Dataset):
                 images.append(img_path)
                 gts.append(gt_path)
                 depths.append(depth_path)
+
         self.images = images
         self.gts = gts
         self.depths=depths
@@ -168,7 +170,7 @@ class SalObjDataset(data.Dataset):
         return self.size
 
 #dataloader for training
-def get_loader(image_root, gt_root,depth_root, batchsize, trainsize, shuffle=True, num_workers=12, pin_memory=True):
+def get_loader(image_root, gt_root,depth_root, batchsize, trainsize, shuffle=False, num_workers=12, pin_memory=True):
 
     dataset = SalObjDataset(image_root, gt_root, depth_root,trainsize)
     data_loader = data.DataLoader(dataset=dataset,

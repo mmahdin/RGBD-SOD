@@ -1,10 +1,9 @@
 from torchvision.models import resnet50, ResNet50_Weights
 import torch
 import torch.nn as nn
-import torchvision.models as models
 from models.ResNet import ResNet50
 from torch.nn import functional as F
-import math
+from typing import Tuple
 
 
 def conv3x3(in_planes, out_planes, stride=1):
@@ -230,355 +229,237 @@ class Refine(nn.Module):
         return x1, x2, x3
 
 
-class TFFBlock(nn.Module):
-    def __init__(self, dim):
-        super(TFFBlock, self).__init__()
-        # RGB projections
-        self.q_rr = nn.Linear(dim, dim)
-        self.q_rt = nn.Linear(dim, dim)
-        self.k_r  = nn.Linear(dim, dim)
-        self.v_r  = nn.Linear(dim, dim)
-        
-        # Depth projections
-        self.q_tt = nn.Linear(dim, dim)
-        self.q_tr = nn.Linear(dim, dim)
-        self.k_t  = nn.Linear(dim, dim)
-        self.v_t  = nn.Linear(dim, dim)
-        
-        # MLP head
-        self.mlp = nn.Sequential(
-            nn.Linear(dim, dim * 4),
-            nn.ReLU(inplace=True),
-            nn.Linear(dim * 4, dim)
-        )
-        
-        self.scale = math.sqrt(dim)
-
-    def _attention(self, Q, K, V):
-        """
-        Computes scaled dot-product attention:
-        Softmax(QK^T / sqrt(d)) V
-        Q, K, V: [B, N, C]
-        Returns: [B, N, C]
-        """
-        attn = torch.softmax((Q @ K.transpose(-2, -1)) / self.scale, dim=-1)
-        return attn @ V
-
-    def forward(self, R, T):
-        """
-        R, T: [B, C, H, W]
-        """
-        B, C, H, W = R.shape
-        N = H * W
-        
-        # Flatten spatial dims
-        R_flat = R.permute(0, 2, 3, 1).reshape(B, N, C)
-        T_flat = T.permute(0, 2, 3, 1).reshape(B, N, C)
-        
-        # Project RGB
-        Q_rr = self.q_rr(R_flat)
-        Q_rt = self.q_rt(R_flat)
-        K_r  = self.k_r(R_flat)
-        V_r  = self.v_r(R_flat)
-        
-        # Project Depth
-        Q_tt = self.q_tt(T_flat)
-        Q_tr = self.q_tr(T_flat)
-        K_t  = self.k_t(T_flat)
-        V_t  = self.v_t(T_flat)
-        
-        # Self-attention
-        A_rr = self._attention(Q_rr, K_r, V_r)
-        A_tt = self._attention(Q_tt, K_t, V_t)
-        SA = A_rr + A_tt
-        
-        # Cross-attention
-        A_rt = self._attention(Q_rt, K_t, V_t)
-        A_tr = self._attention(Q_tr, K_r, V_r)
-        CA = A_rt + A_tr
-        
-        # Eq. (3): O_i
-        O = SA + CA + R_flat
-        
-        # Eq. (4): M_i
-        M = self.mlp(O)
-        
-        # Eq. (5): F_i
-        F = R_flat + M
-        
-        # Reshape back to [B, C, H, W]
-        return F.reshape(B, H, W, C).permute(0, 3, 1, 2)
-
-
-
 # =========================
 # Attention Blocks
 # =========================
-class SelfAttn2d(nn.Module):
-    def __init__(self, in_channels, num_heads=4, max_proj=256, dropout=0.0):
+class PatchEmbedConv(nn.Module):
+    """
+    Patchify via a conv layer: conv(in_ch -> embed_dim, kernel_size=patch_size, stride=patch_size)
+    Input: (B, C, H, W)
+    Output tokens: (L, B, embed_dim) where L = (H/ps)*(W/ps)
+    Also returns spatial size (H', W') for unpatchify.
+    """
+
+    def __init__(self, in_ch: int, embed_dim: int, patch_size: int):
         super().__init__()
-        d_model = min(in_channels, max_proj)
-        self.proj_in = nn.Conv2d(in_channels, d_model, kernel_size=1, bias=True)
-        self.proj_out = nn.Conv2d(d_model, in_channels, kernel_size=1, bias=True)
+        assert patch_size >= 1
+        self.patch_size = patch_size
+        self.proj = nn.Conv2d(
+            in_ch, embed_dim, kernel_size=patch_size, stride=patch_size)
+        # optional normalization on token channels
+        self.norm = nn.LayerNorm(embed_dim)
 
-        self.mha = nn.MultiheadAttention(d_model, num_heads, dropout=dropout, batch_first=True)
-        self.pos = PositionalEncoding2D(d_model)
-        self.norm1 = nn.LayerNorm(d_model)
-        self.norm2 = nn.LayerNorm(d_model)
-
-        self.ffn = nn.Sequential(
-            nn.Linear(d_model, d_model * 2),
-            nn.GELU(),
-            nn.Linear(d_model * 2, d_model),
-        )
-        self.gamma_attn = nn.Parameter(torch.zeros(1))
-        self.gamma_ffn = nn.Parameter(torch.zeros(1))
-
-        self.mlp_spatial = ConvMLP(in_channels, hidden_ratio=2.0)  # optional local mixing
-
-    def forward(self, x):
-        """
-        x: (B, C, H, W)
-        """
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, Tuple[int, int]]:
+        # x: (B, C, H, W)
         B, C, H, W = x.shape
-        tokens, (H, W) = _to_tokens(x, self.proj_in, self.pos)   # (B, L, D)
-        # Self Attention
-        y = self.norm1(tokens)
-        y, _ = self.mha(y, y, y, need_weights=False)
-        tokens = tokens + self.gamma_attn * y
-        # FFN
-        y2 = self.norm2(tokens)
-        y2 = self.ffn(y2)
-        tokens = tokens + self.gamma_ffn * y2
-
-        out = _from_tokens(tokens, H, W, self.proj_out)  # (B, C, H, W)
-        out = self.mlp_spatial(out)                      # extra local mixing
-        return out
+        assert H % self.patch_size == 0 and W % self.patch_size == 0, \
+            f"H ({H}) and W ({W}) must be divisible by patch_size ({self.patch_size})"
+        x_p = self.proj(x)  # (B, embed_dim, H', W')
+        B, E, Hp, Wp = x_p.shape
+        # flatten to tokens
+        tokens = x_p.flatten(2).transpose(1, 2)  # (B, L, E), L = Hp*Wp
+        tokens = self.norm(tokens)               # LN over embed dim
+        # (L, B, E) to match nn.MultiheadAttention default
+        tokens = tokens.transpose(0, 1)
+        return tokens, (Hp, Wp)
 
 
-class CrossAttn2d(nn.Module):
-    def __init__(self, in_channels, num_heads=4, max_proj=256, dropout=0.0):
+class PatchUnembedConv(nn.Module):
+    """
+    Project token embeddings back to spatial feature map and upsample to original HxW.
+    - in_tokens: (L, B, embed_dim)
+    - returns: (B, out_ch, H, W) that can be added to original Ri
+    """
+
+    def __init__(self, embed_dim: int, out_ch: int, patch_size: int, Hp: int, Wp: int):
         super().__init__()
-        d_model = min(in_channels, max_proj)
-        self.q_proj = nn.Conv2d(in_channels, d_model, kernel_size=1, bias=True)
-        self.kv_proj = nn.Conv2d(in_channels, d_model, kernel_size=1, bias=True)
-        self.out_proj = nn.Conv2d(d_model, in_channels, kernel_size=1, bias=True)
+        self.embed_dim = embed_dim
+        self.out_ch = out_ch
+        self.patch_size = patch_size
+        # project embed_dim -> out_ch (for each low-res spatial location)
+        self.to_spatial = nn.Linear(embed_dim, out_ch)
+        self.Hp = Hp
+        self.Wp = Wp
 
-        self.mha = nn.MultiheadAttention(d_model, num_heads, dropout=dropout, batch_first=True)
-        self.pos_q = PositionalEncoding2D(d_model)
-        self.pos_kv = PositionalEncoding2D(d_model)
-        self.norm_q = nn.LayerNorm(d_model)
-        self.norm_kv = nn.LayerNorm(d_model)
-        self.norm_ffn = nn.LayerNorm(d_model)
+    def forward(self, tokens: torch.Tensor, target_hw: Tuple[int, int]) -> torch.Tensor:
+        # tokens: (L, B, E)
+        L, B, E = tokens.shape
+        Hp = self.Hp
+        Wp = self.Wp
+        assert L == Hp * Wp, "token length doesn't match Hp*Wp"
 
-        self.ffn = nn.Sequential(
-            nn.Linear(d_model, d_model * 2),
-            nn.GELU(),
-            nn.Linear(d_model * 2, d_model),
-        )
-        self.gamma_attn = nn.Parameter(torch.zeros(1))
-        self.gamma_ffn = nn.Parameter(torch.zeros(1))
-
-    def forward(self, query_x, context_x):
-        """
-        query_x attends to context_x.
-        Inputs: (B, C, H, W)
-        Returns updated query_x with same shape.
-        """
-        B, C, H, W = query_x.shape
-
-        q_tokens, (H, W) = _to_tokens(query_x, self.q_proj, self.pos_q)      # (B, Lq, D)
-        kv_tokens, _ = _to_tokens(context_x, self.kv_proj, self.pos_kv)      # (B, Lk, D)
-
-        qn = self.norm_q(q_tokens)
-        kvn = self.norm_kv(kv_tokens)
-
-        y, _ = self.mha(qn, kvn, kvn, need_weights=False)
-        q_tokens = q_tokens + self.gamma_attn * y
-
-        y2 = self.norm_ffn(q_tokens)
-        y2 = self.ffn(y2)
-        q_tokens = q_tokens + self.gamma_ffn * y2
-
-        out = _from_tokens(q_tokens, H, W, self.out_proj)  # (B, C, H, W)
-        return out
-
-
-class FusionBlock2D(nn.Module):
-    """
-    Self-attention for each modality + cross-attention both ways.
-    Returns updated (rgb, depth).
-    """
-    def __init__(self, channels, num_heads=4, max_proj=256, dropout=0.0):
-        super().__init__()
-        self.self_rgb = SelfAttn2d(channels, num_heads=num_heads, max_proj=max_proj, dropout=dropout)
-        self.self_dep = SelfAttn2d(channels, num_heads=num_heads, max_proj=max_proj, dropout=dropout)
-
-        self.cross_rgb_from_dep = CrossAttn2d(channels, num_heads=num_heads, max_proj=max_proj, dropout=dropout)
-        self.cross_dep_from_rgb = CrossAttn2d(channels, num_heads=num_heads, max_proj=max_proj, dropout=dropout)
-
-        # Gated residual merge
-        self.gate_rgb = nn.Sequential(
-            nn.Conv2d(channels * 2, channels, kernel_size=1, bias=True),
-            nn.GELU(),
-            nn.Conv2d(channels, channels, kernel_size=1, bias=True),
-            nn.Sigmoid()
-        )
-        self.gate_dep = nn.Sequential(
-            nn.Conv2d(channels * 2, channels, kernel_size=1, bias=True),
-            nn.GELU(),
-            nn.Conv2d(channels, channels, kernel_size=1, bias=True),
-            nn.Sigmoid()
-        )
-
-    def forward(self, x_rgb, x_dep):
-        # 1) self-attention refinement
-        r = self.self_rgb(x_rgb)
-        d = self.self_dep(x_dep)
-        # 2) cross attention (bi-directional)
-        r_cross = self.cross_rgb_from_dep(r, d)
-        d_cross = self.cross_dep_from_rgb(d, r)
-        # 3) gated residual blend
-        g_r = self.gate_rgb(torch.cat([r, r_cross], dim=1))
-        g_d = self.gate_dep(torch.cat([d, d_cross], dim=1))
-        out_r = r + g_r * r_cross
-        out_d = d + g_d * d_cross
-        return out_r, out_d
-
-
-# =========================
-# Positional Encoding (2D)
-# =========================
-class PositionalEncoding2D(nn.Module):
-    """
-    Sine-cosine 2D positional encoding that maps (H, W) into d_model.
-    Adapted to work with channels-last token embeddings in attention.
-    """
-    def __init__(self, d_model: int):
-        super().__init__()
-        self.d_model = d_model
-        # keep a cache by size to avoid recomputing
-        self.register_buffer("_cached", torch.zeros(1), persistent=False)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        x: (B, L, D) where L = H*W and D = d_model
-        We assume tokens were created by flattening H*W with row-major order.
-        """
-        B, L, D = x.shape
-        d_model = D
-        # Infer H and W heuristically: prefer square-ish (assumes caller uses consistent H, W)
-        H = W = int(math.sqrt(L))
-        if H * W != L:
-            # fallback: assume the caller provided (B, C, H, W) before flatten and tracked H, W
-            # If you want explicit H,W passing, add it to the module signature.
-            H = L
-            W = 1
-
-        device = x.device
-        # Cache key
-        key = (H, W, d_model)
-        if (not isinstance(self._cached, torch.Tensor)) or self._cached.numel() == 1:
-            self._cache = {}
-            self._cached = torch.zeros(2, device=device)  # just a non-empty tensor
-
-        if key in getattr(self, "_cache", {}):
-            pe = self._cache[key]
-            if pe.device != device:
-                pe = pe.to(device)
-                self._cache[key] = pe
+        # to (B, L, out_ch)
+        t = tokens.transpose(0, 1)  # (B, L, E)
+        t = self.to_spatial(t)      # (B, L, out_ch)
+        # reshape to (B, out_ch, Hp, Wp)
+        t = t.transpose(1, 2).contiguous().view(B, self.out_ch, Hp, Wp)
+        # upsample to original H, W
+        H, W = target_hw
+        if (Hp * self.patch_size, Wp * self.patch_size) != (H, W):
+            # just in case target_hw provided doesn't match, compute desired scale
+            t = F.interpolate(t, size=(H, W), mode='bilinear',
+                              align_corners=False)
         else:
-            pe = self._build_pe(H, W, d_model, device)  # (H*W, D)
-            if not hasattr(self, "_cache"):
-                self._cache = {}
-            self._cache[key] = pe
-
-        pe = pe.unsqueeze(0).expand(B, -1, -1)  # (B, L, D)
-        return x + pe
-
-    @staticmethod
-    def _build_pe(H: int, W: int, d_model: int, device) -> torch.Tensor:
-        """
-        Classic 2D sine-cosine split: half dims for H, half for W (even d_model).
-        """
-        if d_model % 2 != 0:
-            # make even by dropping last dim if needed
-            d_model = d_model - 1
-        half = d_model // 2
-        # positions
-        y = torch.arange(H, device=device).float()
-        x = torch.arange(W, device=device).float()
-        yy, xx = torch.meshgrid(y, x, indexing="ij")  # (H, W)
-
-        # frequencies
-        div_term_y = torch.exp(torch.arange(0, half, 2, device=device).float() * (-math.log(10000.0) / half))
-        div_term_x = torch.exp(torch.arange(0, half, 2, device=device).float() * (-math.log(10000.0) / half))
-
-        pe_y = torch.zeros(H, W, half, device=device)
-        pe_x = torch.zeros(H, W, half, device=device)
-
-        pe_y[..., 0::2] = torch.sin(yy[..., None] * div_term_y)
-        pe_y[..., 1::2] = torch.cos(yy[..., None] * div_term_y)
-
-        pe_x[..., 0::2] = torch.sin(xx[..., None] * div_term_x)
-        pe_x[..., 1::2] = torch.cos(xx[..., None] * div_term_x)
-
-        pe = torch.cat([pe_y, pe_x], dim=-1)  # (H, W, D)
-        if pe.shape[-1] + 1 == d_model + 1:  # if we dropped a dim
-            pass
-        pe = pe.view(H * W, -1)  # (L, D)
-        # If original D was odd, pad one zero
-        if pe.shape[-1] % 2 == 1:
-            pe = F.pad(pe, (0,1))
-        return pe
+            t = F.interpolate(t, scale_factor=self.patch_size,
+                              mode='bilinear', align_corners=False)
+        return t
 
 
-# =========================
-# Helpers
-# =========================
-class ConvMLP(nn.Module):
-    """Lightweight 1x1-Conv MLP with GELU and residual gate."""
-    def __init__(self, channels, hidden_ratio=2.0):
+class CrossMultiHeadAttention(nn.Module):
+    """
+    Wrapper for cross-attention using nn.MultiheadAttention.
+    - query: (Lq, B, E)
+    - key/value: (Lk, B, E)
+    Returns: attn_out shape (Lq, B, E)
+    """
+
+    def __init__(self, embed_dim: int, num_heads: int, attn_dropout: float = 0.0):
         super().__init__()
-        hidden = max(4, int(channels * hidden_ratio))
-        self.net = nn.Sequential(
-            nn.Conv2d(channels, hidden, kernel_size=1, bias=True),
-            nn.GELU(),
-            nn.Conv2d(hidden, channels, kernel_size=1, bias=True),
-        )
-        self.gamma = nn.Parameter(torch.zeros(1))  # residual scale
+        self.mha = nn.MultiheadAttention(
+            embed_dim, num_heads, dropout=attn_dropout, batch_first=False)
+        self.dropout = nn.Dropout(attn_dropout)
+        self.proj = nn.Identity()  # placeholder if you want an output linear
+
+    def forward(self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, attn_mask=None):
+        # query: (Lq, B, E), key/value: (Lk, B, E)
+        # nn.MultiheadAttention expects (L, B, E) when batch_first=False
+        attn_out, _ = self.mha(query, key, value, attn_mask=attn_mask)
+        attn_out = self.dropout(attn_out)
+        return self.proj(attn_out)
+
+
+class FeedForward(nn.Module):
+    def __init__(self, dim, hidden_dim, dropout=0.0):
+        super().__init__()
+        self.fc1 = nn.Linear(dim, hidden_dim)
+        self.act = nn.GELU()
+        self.fc2 = nn.Linear(hidden_dim, dim)
+        self.dropout = nn.Dropout(dropout)
+        self.norm = nn.LayerNorm(dim)
 
     def forward(self, x):
-        return x + self.gamma * self.net(x)
+        # x: (L, B, E)
+        # apply LN over last dim: easier to transpose to (B,L,E)
+        x_t = x.transpose(0, 1)   # (B, L, E)
+        y = self.norm(x_t)
+        y = self.fc1(y)
+        y = self.act(y)
+        y = self.dropout(y)
+        y = self.fc2(y)
+        y = self.dropout(y)
+        y = y.transpose(0, 1)     # (L, B, E)
+        return y
 
 
-def _to_tokens(x, proj, posenc: PositionalEncoding2D):
+class RGBDViTBlock(nn.Module):
     """
-    x: (B, C, H, W) -> tokens: (B, L, D)
+    Single-level fusion block using:
+      - self-attention (per modality)
+      - cross-attention (query=RGB, key/value=Depth and vice-versa)
+      - MLP (token-wise)
+      - residual connections back to original Ri/Ti feature maps.
+
+    Input:
+      Ri: (B, C_r, H, W)  - RGB features from ResNet
+      Ti: (B, C_t, H, W)  - Depth features from separate ResNet (same spatial size)
+    Output:
+      Fr: (B, C_r, H, W)  - fused RGB features
+      Ft: (B, C_t, H, W)  - fused Depth features
+
+    Notes:
+      - patch_size must divide H and W.
+      - embed_dim: dimension used inside attention tokens.
     """
-    B, C, H, W = x.shape
-    y = proj(x)                        # (B, D, H, W)
-    y = y.flatten(2).transpose(1, 2)   # (B, L, D)
-    y = posenc(y)
-    return y, (H, W)
+
+    def __init__(self,
+                 in_ch_r: int,
+                 in_ch_t: int,
+                 embed_dim: int = 256,
+                 num_heads: int = 8,
+                 patch_size: int = 4,
+                 mlp_ratio: float = 4.0,
+                 attn_dropout: float = 0.0,
+                 dropout: float = 0.0):
+        super().__init__()
+        self.patch_size = patch_size
+        # Patch embedders for each modality (conv-based)
+        self.rgb_patch = PatchEmbedConv(in_ch_r, embed_dim, patch_size)
+        self.dep_patch = PatchEmbedConv(in_ch_t, embed_dim, patch_size)
+
+        # Self-attention for each modality
+        self.rgb_self_attn = CrossMultiHeadAttention(
+            embed_dim, num_heads, attn_dropout)
+        self.dep_self_attn = CrossMultiHeadAttention(
+            embed_dim, num_heads, attn_dropout)
+
+        # Cross-attention: rgb queries, depth keys/vals and vice versa
+        self.rgb_cross_attn = CrossMultiHeadAttention(
+            embed_dim, num_heads, attn_dropout)
+        self.dep_cross_attn = CrossMultiHeadAttention(
+            embed_dim, num_heads, attn_dropout)
+
+        # MLPs
+        hidden_dim = int(embed_dim * mlp_ratio)
+        self.mlp = FeedForward(embed_dim, hidden_dim, dropout)
+
+        # Project back to original channel counts
+        # We'll use a small linear inside PatchUnembed but need to create it after we know Hp/Wp - so build later dynamically
+        self._out_proj = None  # placeholder
+
+    def _ensure_unembed(self, Hp, Wp, in_ch_r, in_ch_t, device):
+        if (self._out_proj is None) or (self._out_proj.Hp != Hp):
+            self._out_proj = PatchUnembedConv(embed_dim=self.rgb_patch.proj.out_channels,
+                                              out_ch=in_ch_r,
+                                              patch_size=self.patch_size,
+                                              Hp=Hp, Wp=Wp)
+            # move to device
+            self._out_proj.to(device)
+
+    def forward(self, Ri: torch.Tensor, Ti: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Ri: (B, C_r, H, W)
+        Ti: (B, C_t, H, W)
+        returns: Fr, Ft same shapes as Ri and Ti
+        """
+        B, Cr, H, W = Ri.shape
+        B2, Ct, H2, W2 = Ti.shape
+        assert B == B2 and H == H2 and W == W2, "Inputs must have same batch and spatial dims"
+        device = Ri.device
+
+        # Patchify both
+        rgb_tokens, (Hp, Wp) = self.rgb_patch(Ri)  # (L, B, E)
+        dep_tokens, _ = self.dep_patch(Ti)
+
+        # L = rgb_tokens.shape[0]
+        # ensure unembed modules created
+        self._ensure_unembed(Hp, Wp, Cr, Ct, device)
+
+        # --- RGB stream ---
+        # Self-attn (pre-LN style already applied in PatchEmbedConv)
+        rgb_self = self.rgb_self_attn(rgb_tokens, rgb_tokens, rgb_tokens)
+        dep_self = self.dep_self_attn(dep_tokens, dep_tokens, dep_tokens)
+        self_attention = rgb_self + dep_self
+
+        # Cross-attn: rgb queries, depth key/value
+        rgb_cross = self.rgb_cross_attn(rgb_tokens, dep_tokens, dep_tokens)
+        dep_cross = self.dep_cross_attn(dep_tokens, rgb_tokens, rgb_tokens)
+        cross_attention = rgb_cross + dep_cross
+
+        o = self_attention + cross_attention + rgb_tokens
+
+        m = self.mlp(o)
+
+        f = self._out_proj(m, (H, W)) + Ri
+
+        return f
 
 
-def _from_tokens(tokens, H, W, out_proj):
-    """
-    tokens: (B, L, D) -> (B, C, H, W)
-    """
-    B, L, D = tokens.shape
-    y = tokens.transpose(1, 2).view(B, D, H, W)  # (B, D, H, W)
-    y = out_proj(y)                              # (B, C, H, W)
-    return y
-
-
-
+# ==================================================================
 
 class BaseModel(nn.Module):
     def __init__(self, channel=32):
         super().__init__()
-        
+
         # Backbone model
         self.resnet = ResNet50('rgb')
         self.resnet_depth = ResNet50('rgbd')
@@ -616,7 +497,7 @@ class BaseModel(nn.Module):
         self.out0_conv = nn.Conv2d(32*3, 1, kernel_size=1, stride=1, bias=True)
         self.out1_conv = nn.Conv2d(32*2, 1, kernel_size=1, stride=1, bias=True)
         self.out2_conv = nn.Conv2d(32*1, 1, kernel_size=1, stride=1, bias=True)
-    
+
     def _make_agant_layer(self, inplanes, planes):
         layers = nn.Sequential(
             nn.Conv2d(inplanes, planes, kernel_size=1,
@@ -776,7 +657,6 @@ class BBSNetChannelSpatialAttention(BaseModel):
         # Refine low-layer features by initial map
         x, x1, x5 = self.HA(attention_map.sigmoid(), x, x1, x2)
 
-
         # produce final saliency map by decoder2
         x0_2 = self.rfb0_2(x)
         x1_2 = self.rfb1_2(x1)
@@ -791,28 +671,48 @@ class BBSNetChannelSpatialAttention(BaseModel):
         y = self.deconv2(y)
         y = self.out2_conv(y)
 
-
         return self.upsample(attention_map), y
-
 
 
 class BBSNetTransformerAttention(BaseModel):
     def __init__(self):
         super().__init__()
 
-        # TFF modules per stage
         dropout = 0.1
 
-        heads_stage=(4, 4, 8, 8, 8)
-        maxproj_stage=(128, 192, 256, 256, 256)
-        C = [64, 256, 512, 1024, 2048]
+        heads_stage = (4, 4, 8, 8, 8)
+        embed_stage = (128, 192, 256, 256, 256)  # embed_dim for each stage
+        C = [64, 256, 512, 1024, 2048]           # channel dims from ResNet
 
-        # TFF modules per stage
-        self.fuse0   = FusionBlock2D(C[0], num_heads=heads_stage[0], max_proj=maxproj_stage[0], dropout=dropout)
-        self.fuse1   = FusionBlock2D(C[1], num_heads=heads_stage[1], max_proj=maxproj_stage[1], dropout=dropout)
-        self.fuse2   = FusionBlock2D(C[2], num_heads=heads_stage[2], max_proj=maxproj_stage[2], dropout=dropout)
-        self.fuse3_1 = FusionBlock2D(C[3], num_heads=heads_stage[3], max_proj=maxproj_stage[3], dropout=dropout)
-        self.fuse4_1 = FusionBlock2D(C[4], num_heads=heads_stage[4], max_proj=maxproj_stage[4], dropout=dropout)
+        # you can also set per stage (smaller patch for early layers)
+        patch_size = [4, 4, 4, 2, 1]
+
+        # Replace FusionBlock2D with RGBDViTBlock
+        self.fuse0 = RGBDViTBlock(
+            in_ch_r=C[0], in_ch_t=C[0],
+            embed_dim=embed_stage[0], num_heads=heads_stage[0],
+            patch_size=patch_size[0], dropout=dropout, attn_dropout=dropout
+        )
+        self.fuse1 = RGBDViTBlock(
+            in_ch_r=C[1], in_ch_t=C[1],
+            embed_dim=embed_stage[1], num_heads=heads_stage[1],
+            patch_size=patch_size[1], dropout=dropout, attn_dropout=dropout
+        )
+        self.fuse2 = RGBDViTBlock(
+            in_ch_r=C[2], in_ch_t=C[2],
+            embed_dim=embed_stage[2], num_heads=heads_stage[2],
+            patch_size=patch_size[2], dropout=dropout, attn_dropout=dropout
+        )
+        self.fuse3_1 = RGBDViTBlock(
+            in_ch_r=C[3], in_ch_t=C[3],
+            embed_dim=embed_stage[3], num_heads=heads_stage[3],
+            patch_size=patch_size[3], dropout=dropout, attn_dropout=dropout
+        )
+        self.fuse4_1 = RGBDViTBlock(
+            in_ch_r=C[4], in_ch_t=C[4],
+            embed_dim=embed_stage[4], num_heads=heads_stage[4],
+            patch_size=patch_size[4], dropout=dropout, attn_dropout=dropout
+        )
 
         if self.training:
             self.initialize_weights()
@@ -830,45 +730,45 @@ class BBSNetTransformerAttention(BaseModel):
         x_depth = self.resnet_depth.maxpool(x_depth)
 
         # ---- layer0 fusion (64ch) ----
-        x, x_depth = self.fuse0(x, x_depth)
+        x = self.fuse0(x, x_depth)
 
         # layer1
-        x1 = self.resnet.layer1(x)              # (B, 256, H/4, W/4) typical
+        x1 = self.resnet.layer1(x)
         x1_depth = self.resnet_depth.layer1(x_depth)
 
         # ---- layer1 fusion (256ch) ----
-        x1, x1_depth = self.fuse1(x1, x1_depth)
+        x1 = self.fuse1(x1, x1_depth)
 
         # layer2
-        x2 = self.resnet.layer2(x1)             # (B, 512, H/8, W/8)
+        x2 = self.resnet.layer2(x1)
         x2_depth = self.resnet_depth.layer2(x1_depth)
 
         # ---- layer2 fusion (512ch) ----
-        x2, x2_depth = self.fuse2(x2, x2_depth)
+        x2 = self.fuse2(x2, x2_depth)
 
         # layer3_1
-        x3_1 = self.resnet.layer3_1(x2)         # (B, 1024, H/16, W/16) depending on your impl
+        x3_1 = self.resnet.layer3_1(x2)
         x3_1_depth = self.resnet_depth.layer3_1(x2_depth)
 
         # ---- layer3_1 fusion (1024ch) ----
-        x3_1, x3_1_depth = self.fuse3_1(x3_1, x3_1_depth)
+        x3_1 = self.fuse3_1(x3_1, x3_1_depth)
 
         # layer4_1
-        x4_1 = self.resnet.layer4_1(x3_1)       # (B, 2048, H/32, W/32)
+        x4_1 = self.resnet.layer4_1(x3_1)
         x4_1_depth = self.resnet_depth.layer4_1(x3_1_depth)
 
         # ---- layer4_1 fusion (2048ch) ----
-        x4_1, x4_1_depth = self.fuse4_1(x4_1, x4_1_depth)
+        x4_1 = self.fuse4_1(x4_1, x4_1_depth)
 
         # produce initial saliency map by decoder1
         x2_1 = self.rfb2_1(x2)
         x3_1 = self.rfb3_1(x3_1)
         x4_1 = self.rfb4_1(x4_1)
+
         attention_map = self.agg1(x4_1, x3_1, x2_1)
 
         # Refine low-layer features by initial map
         x, x1, x5 = self.HA(attention_map.sigmoid(), x, x1, x2)
-
 
         # produce final saliency map by decoder2
         x0_2 = self.rfb0_2(x)
@@ -884,8 +784,4 @@ class BBSNetTransformerAttention(BaseModel):
         y = self.deconv2(y)
         y = self.out2_conv(y)
 
-
         return self.upsample(attention_map), y
-
-
-
