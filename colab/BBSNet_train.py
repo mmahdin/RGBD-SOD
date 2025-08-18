@@ -38,8 +38,10 @@ best_mae = 1
 best_epoch = 0
 
 # =======================
-# Load checkpoint if provided
+# Load checkpoint helper
 # =======================
+
+
 def load_optimizer_state_to_cuda(optimizer, checkpoint_state, device='cuda'):
     optimizer.load_state_dict(checkpoint_state)
     for state in optimizer.state.values():
@@ -47,19 +49,46 @@ def load_optimizer_state_to_cuda(optimizer, checkpoint_state, device='cuda'):
             if isinstance(v, torch.Tensor):
                 state[k] = v.to(device)
 
+
+def load_model_with_lazy_unembed(model, state_dict):
+    """
+    Load model partially (strict=False).
+    Keep _out_proj weights aside until those layers are built.
+    """
+    missing, unexpected = model.load_state_dict(state_dict, strict=False)
+    pending_unembed = {k: v for k,
+                       v in state_dict.items() if "._out_proj." in k}
+    return pending_unembed
+
+
+def restore_unembed_weights(model, pending_unembed):
+    """
+    Copy stored _out_proj weights into the model after they exist.
+    """
+    own_state = model.state_dict()
+    for k, v in pending_unembed.items():
+        if k in own_state:
+            own_state[k].copy_(v)
+
+
+# =======================
+# Load checkpoint if provided
+# =======================
+pending_unembed = None
 if opt.load is not None and os.path.exists(opt.load):
     checkpoint = torch.load(opt.load, weights_only=False)
     if isinstance(checkpoint, dict):  # Resuming from full checkpoint
-        model.load_state_dict(checkpoint['model_state'])
-        load_optimizer_state_to_cuda(optimizer, checkpoint['optimizer_state'], device='cuda')
+        pending_unembed = load_model_with_lazy_unembed(
+            model, checkpoint['model_state'])
+        load_optimizer_state_to_cuda(
+            optimizer, checkpoint['optimizer_state'], device='cuda')
         start_epoch = checkpoint['epoch'] + 1
         best_mae = checkpoint.get('best_mae', 1)
         best_epoch = checkpoint.get('best_epoch', 0)
         print(f"Resumed from epoch {checkpoint['epoch']}, best MAE={best_mae}")
     else:  # Loading only model weights
-        model.load_state_dict(checkpoint)
+        pending_unembed = load_model_with_lazy_unembed(model, checkpoint)
         print(f"Loaded weights from {opt.load}")
-
 
 model.cuda()
 
@@ -106,7 +135,7 @@ writer = SummaryWriter(save_path + 'summary')
 step = 0
 
 
-def train(train_loader, model, optimizer, epoch, save_path):
+def train(train_loader, model, optimizer, epoch, save_path, pending_unembed=None):
     global step
     model.train()
     loss_all = 0
@@ -120,6 +149,13 @@ def train(train_loader, model, optimizer, epoch, save_path):
         depths = depths.cuda()
 
         s1, s2 = model(images, depths)
+
+        # 🔥 After the first forward pass, _out_proj layers are created → restore weights if any
+        if pending_unembed is not None:
+            restore_unembed_weights(model, pending_unembed)
+            print("Restored _out_proj weights into model.")
+            pending_unembed = None  # restore only once
+
         loss1 = CE(s1, gts)
         loss2 = CE(s2, gts)
         loss = loss1 + loss2
@@ -138,18 +174,22 @@ def train(train_loader, model, optimizer, epoch, save_path):
                 epoch, opt.epoch, i, total_step, loss1.data, loss2.data))
             writer.add_scalar('Loss', loss.data, global_step=step)
 
-            grid_image = make_grid(images[0].clone().cpu().data, 1, normalize=True)
+            grid_image = make_grid(
+                images[0].clone().cpu().data, 1, normalize=True)
             writer.add_image('RGB', grid_image, step)
-            grid_image = make_grid(gts[0].clone().cpu().data, 1, normalize=True)
+            grid_image = make_grid(
+                gts[0].clone().cpu().data, 1, normalize=True)
             writer.add_image('Ground_truth', grid_image, step)
 
             for idx, out in enumerate([s1, s2], 1):
                 res = out[0].clone().sigmoid().data.cpu().numpy().squeeze()
                 res = (res - res.min()) / (res.max() - res.min() + 1e-8)
-                writer.add_image(f's{idx}', torch.tensor(res), step, dataformats='HW')
+                writer.add_image(f's{idx}', torch.tensor(
+                    res), step, dataformats='HW')
 
     loss_all /= epoch_step
-    logging.info('#TRAIN#:Epoch [{:03d}/{:03d}], Loss_AVG: {:.4f}'.format(epoch, opt.epoch, loss_all))
+    logging.info(
+        '#TRAIN#:Epoch [{:03d}/{:03d}], Loss_AVG: {:.4f}'.format(epoch, opt.epoch, loss_all))
     writer.add_scalar('Loss-epoch', loss_all, global_step=epoch)
 
     # Save train loss to CSV
@@ -164,7 +204,7 @@ def train(train_loader, model, optimizer, epoch, save_path):
         'optimizer_state': optimizer.state_dict(),
         'best_mae': best_mae,
         'best_epoch': best_epoch
-    }, os.path.join(save_path, f'checkpoint.pth'))
+    }, os.path.join(save_path, 'checkpoint.pth'))
 
 
 def test(test_loader, model, epoch, save_path):
@@ -179,14 +219,16 @@ def test(test_loader, model, epoch, save_path):
             image = image.cuda()
             depth = depth.cuda()
             _, res = model(image, depth)
-            res = F.interpolate(res, size=gt.shape, mode='bilinear', align_corners=False)
+            res = F.interpolate(res, size=gt.shape,
+                                mode='bilinear', align_corners=False)
             res = res.sigmoid().data.cpu().numpy().squeeze()
             res = (res - res.min()) / (res.max() - res.min() + 1e-8)
             mae_sum += np.sum(np.abs(res - gt)) / (gt.shape[0] * gt.shape[1])
 
         mae = mae_sum / test_loader.size
         writer.add_scalar('MAE', torch.tensor(mae), global_step=epoch)
-        print(f"Epoch: {epoch} MAE: {mae} ####  bestMAE: {best_mae} bestEpoch: {best_epoch}")
+        print(
+            f"Epoch: {epoch} MAE: {mae} ####  bestMAE: {best_mae} bestEpoch: {best_epoch}")
 
         # Save test MAE to CSV
         with open(loss_log_file, 'a', newline='') as f:
@@ -199,7 +241,8 @@ def test(test_loader, model, epoch, save_path):
             if mae < best_mae:
                 best_mae = mae
                 best_epoch = epoch
-                torch.save(model.state_dict(), os.path.join(save_path, 'BBSNet_epoch_best.pth'))
+                torch.save(model.state_dict(), os.path.join(
+                    save_path, 'BBSNet_epoch_best.pth'))
                 print(f"Best epoch updated: {epoch}")
         logging.info('#TEST#:Epoch:{} MAE:{} bestEpoch:{} bestMAE:{}'.format(
             epoch, mae, best_epoch, best_mae))
@@ -208,7 +251,8 @@ def test(test_loader, model, epoch, save_path):
 def main():
     print("Start training...")
     for epoch in range(start_epoch, opt.epoch + 1):
-        cur_lr = adjust_lr(optimizer, opt.lr, epoch, opt.decay_rate, opt.decay_epoch)
+        cur_lr = adjust_lr(optimizer, opt.lr, epoch,
+                           opt.decay_rate, opt.decay_epoch)
         writer.add_scalar('learning_rate', cur_lr, global_step=epoch)
         train(train_loader, model, optimizer, epoch, save_path)
         test(test_loader, model, epoch, save_path)

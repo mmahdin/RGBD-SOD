@@ -1,0 +1,19 @@
+Patchify
+xformers
+flash-attn
+swin transformer
+======================================================
+من یک پروژه SOD دارم که میخوام ناحیه های برجسته رو با استفاده از داده های مولتی مودال RGB-D تشخیص بدم. وظیفه من بهبود قسمت فیوژن بین دو مدالیتی هست. من باید با استفاده از ایده ویژن ترسفورمر و سلف اتنشن و کراس اتنشن دوتا مدالیتی رو ترکیب کنم. یعنی از سلف اتنشن استفاده کنم برای هر مدالیتی و از کراس انتشن استفاده کنم. نحوه استفاده از اینها به صورت زیر هست:
+Oi = self_attention(Ri, Ti) + cross_attention(Ri, Ti) + Ri
+Mi = MLP(Oi)
+Fi = Ri + Mi
+که در فرمول بالا Ri فیچرهای مربوط به RGB هست که از شبکه resnet استخراج شده و Ti مربوط به ویژگی‌های depth هست که از شبکه رزنت جداگانه استخراج شده. و i نشان دهنده فیچرها در سطح های مختلف هست. من باید ماژولی بنویسم که اینهارو ترکیب کنه. 
+
+لطفا ساختار ویژن ترنسفورمر رو برای اینکار بنویس. من میخوام ازش به عنوان ماژول توی کد اصلی خودم استفاده کنم.
+
+I have a SOD project where I want to detect salient regions using multi-modal RGB-D data. My task is to improve the fusion part between the two modalities. I need to combine the two modalities using the idea of Vision Transformer and self-attention and cross-attention. That is, use self-attention for each modality and use cross-attention. The way to use them is as follows:
+Oi = self_attention(Ri, Ti) + cross_attention(Ri, Ti) + Ri
+Mi = MLP(Oi)
+Fi = Ri + Mi
+In the above formula, Ri are the features related to RGB extracted from the ResNet network, and Ti are the features related to depth extracted from a separate ResNet network. And i represents features at different levels. I need to write a module that combines these.
+Please write the structure of the Vision Transformer for this. I want to use it as a module in my main code.(use pytorch)
