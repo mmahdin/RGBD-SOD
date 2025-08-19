@@ -17,3 +17,12 @@ Mi = MLP(Oi)
 Fi = Ri + Mi
 In the above formula, Ri are the features related to RGB extracted from the ResNet network, and Ti are the features related to depth extracted from a separate ResNet network. And i represents features at different levels. I need to write a module that combines these.
 Please write the structure of the Vision Transformer for this. I want to use it as a module in my main code.(use pytorch)
+
+======================================================
+
+من باید مقدمه پایانامه خودم رو بنویسم. موضوع پایانامه من  بهبود تشخیص اشیاء برجسته با استفاده از مدل‌های تراسنفورمر و مکانیزم توجه روی داده‌های چند منظوره RGB-D هست. توی مقدمه باید مطالب زیر رو قرار بدم:
+مقدمه
+اهمیت و ضرورت تحقیق
+هدف از انجام پروژه 
+روش کلی تحقیق
+ساختار گزارش
