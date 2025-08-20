@@ -1,6 +1,8 @@
 import argparse
 import sys
 
+version = 4
+
 parser = argparse.ArgumentParser()
 parser.add_argument('--epoch', type=int, default=200, help='epoch number')
 parser.add_argument('--lr', type=float, default=1e-4, help='learning rate')
@@ -15,7 +17,7 @@ parser.add_argument('--decay_rate', type=float, default=0.1,
 parser.add_argument('--decay_epoch', type=int, default=60,
                     help='every n epochs decay learning rate')
 parser.add_argument('--load', type=str,
-                    default='/content/drive/My Drive/sod/BBS-Net/BBSNet_cpts3/checkpoint.pth', help='train from checkpoints')
+                    default=f'/content/drive/My Drive/sod/BBS-Net/BBSNet_cpts{version}/checkpoint.pth', help='train from checkpoints')
 # parser.add_argument('--load', type=str, default=None, help='train from checkpoints')
 parser.add_argument('--gpu_id', type=str, default='0', help='train use gpu')
 
@@ -34,7 +36,7 @@ parser.add_argument('--test_depth_root', type=str,
 parser.add_argument('--test_gt_root', type=str,
                     default='/content/dataset/test_in_train/GT/', help='the test gt images root')
 
-parser.add_argument('--save_path', type=str, default='/content/drive/My Drive/sod/BBS-Net/BBSNet_cpts3/',
+parser.add_argument('--save_path', type=str, default=f'/content/drive/My Drive/sod/BBS-Net/BBSNet_cpts{version}/',
                     help='the path to save models and logs')
 
 # ✅ Fix for Jupyter/Colab:

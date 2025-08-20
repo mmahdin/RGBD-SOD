@@ -681,11 +681,11 @@ class BBSNetTransformerAttention(BaseModel):
         dropout = 0.1
 
         heads_stage = (4, 4, 8, 8, 8)
-        embed_stage = (128, 192, 256, 256, 256)  # embed_dim for each stage
+        embed_stage = (32, 64, 128, 128, 128)  # embed_dim for each stage
         C = [64, 256, 512, 1024, 2048]           # channel dims from ResNet
 
         # you can also set per stage (smaller patch for early layers)
-        patch_size = [4, 4, 4, 2, 1]
+        patch_size = [8, 8, 4, 2, 1]
 
         # Replace FusionBlock2D with RGBDViTBlock
         self.fuse0 = RGBDViTBlock(
