@@ -1,7 +1,7 @@
 import argparse
 import sys
 
-version = 4
+version = 5
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--epoch', type=int, default=200, help='epoch number')

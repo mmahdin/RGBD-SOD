@@ -246,21 +246,32 @@ class PatchEmbedConv(nn.Module):
         self.patch_size = patch_size
         self.proj = nn.Conv2d(
             in_ch, embed_dim, kernel_size=patch_size, stride=patch_size)
-        # optional normalization on token channels
         self.norm = nn.LayerNorm(embed_dim)
 
+        # Initialize pos_embed later because L = H/ps * W/ps is unknown until forward
+        self.pos_embed = None
+
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, Tuple[int, int]]:
-        # x: (B, C, H, W)
         B, C, H, W = x.shape
         assert H % self.patch_size == 0 and W % self.patch_size == 0, \
             f"H ({H}) and W ({W}) must be divisible by patch_size ({self.patch_size})"
+
         x_p = self.proj(x)  # (B, embed_dim, H', W')
         B, E, Hp, Wp = x_p.shape
-        # flatten to tokens
         tokens = x_p.flatten(2).transpose(1, 2)  # (B, L, E), L = Hp*Wp
-        tokens = self.norm(tokens)               # LN over embed dim
-        # (L, B, E) to match nn.MultiheadAttention default
-        tokens = tokens.transpose(0, 1)
+
+        # --- Add learnable positional embeddings ---
+        L = tokens.shape[1]
+        if self.pos_embed is None or self.pos_embed.shape[1] != L:
+            # Create learnable pos embedding per patch location
+            self.pos_embed = nn.Parameter(
+                torch.zeros(1, L, E, device=x.device))
+            nn.init.trunc_normal_(self.pos_embed, std=0.02)
+
+        tokens = tokens + self.pos_embed  # (B, L, E)
+
+        tokens = self.norm(tokens)
+        tokens = tokens.transpose(0, 1)  # (L, B, E)
         return tokens, (Hp, Wp)
 
 
