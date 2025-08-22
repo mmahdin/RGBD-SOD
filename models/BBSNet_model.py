@@ -363,118 +363,126 @@ class FeedForward(nn.Module):
 
 
 class RGBDViTBlock(nn.Module):
+    """
+    Single-level fusion block using:
+      - self-attention (per modality)
+      - cross-attention (query=RGB, key/value=Depth and vice-versa)
+      - MLP (token-wise)
+      - residual connections back to original Ri/Ti feature maps.
+
+    Input:
+      Ri: (B, C_r, H, W)  - RGB features from ResNet
+      Ti: (B, C_t, H, W)  - Depth features from separate ResNet (same spatial size)
+    Output:
+      Fr: (B, C_r, H, W)  - fused RGB features
+      Ft: (B, C_t, H, W)  - fused Depth features
+
+    Notes:
+      - patch_size must divide H and W.
+      - embed_dim: dimension used inside attention tokens.
+    """
+
     def __init__(self,
                  in_ch_r: int,
                  in_ch_t: int,
                  embed_dim: int = 256,
                  num_heads: int = 8,
                  patch_size: int = 4,
-                 mlp_ratio: float = 4.0,
+                 mlp_ratio: float = 8.0,
                  attn_dropout: float = 0.0,
                  dropout: float = 0.0):
         super().__init__()
         self.patch_size = patch_size
-
-        # Patch embedders
+        # Patch embedders for each modality (conv-based)
         self.rgb_patch = PatchEmbedConv(in_ch_r, embed_dim, patch_size)
         self.dep_patch = PatchEmbedConv(in_ch_t, embed_dim, patch_size)
 
-        # Self-attn
+        # Self-attention for each modality
         self.rgb_self_attn = CrossMultiHeadAttention(
             embed_dim, num_heads, attn_dropout)
         self.dep_self_attn = CrossMultiHeadAttention(
             embed_dim, num_heads, attn_dropout)
 
-        # Cross-attn
+        # Cross-attention: rgb queries, depth keys/vals and vice versa
         self.rgb_cross_attn = CrossMultiHeadAttention(
             embed_dim, num_heads, attn_dropout)
         self.dep_cross_attn = CrossMultiHeadAttention(
             embed_dim, num_heads, attn_dropout)
 
-        # LayerNorms (Pre-LN)
-        self.norm_rgb_self = nn.LayerNorm(embed_dim)
-        self.norm_dep_self = nn.LayerNorm(embed_dim)
-        self.norm_rgb_cross_q = nn.LayerNorm(embed_dim)
-        self.norm_rgb_cross_kv = nn.LayerNorm(embed_dim)
-        self.norm_dep_cross_q = nn.LayerNorm(embed_dim)
-        self.norm_dep_cross_kv = nn.LayerNorm(embed_dim)
+        # LayerNorm (pre-norm)
+        self.ln_rgb = nn.LayerNorm(embed_dim)
+        self.ln_dep = nn.LayerNorm(embed_dim)
+        self.ln_fusion = nn.LayerNorm(embed_dim)
 
-        # Gating parameters
-        self.gate_rgb_self = nn.Parameter(torch.tensor(1.0))
-        self.gate_dep_self = nn.Parameter(torch.tensor(1.0))
-        self.gate_rgb_cross = nn.Parameter(torch.tensor(1.0))
-        self.gate_dep_cross = nn.Parameter(torch.tensor(1.0))
-
-        # FFN
+        # MLPs
         hidden_dim = int(embed_dim * mlp_ratio)
-        self.ffn_rgb = FeedForward(embed_dim, hidden_dim, dropout)
-        self.ffn_dep = FeedForward(embed_dim, hidden_dim, dropout)
+        self.mlp = FeedForward(embed_dim, hidden_dim, dropout)
 
-        # Unembedders (lazy init)
-        self._out_proj_rgb = None
-        self._out_proj_dep = None
+        # Learnable gates for self-attn and cross-attn fusion
+        self.gate_self_r = nn.Parameter(torch.tensor(0.5))
+        self.gate_self_d = nn.Parameter(torch.tensor(0.5))
+
+        self.gate_cross_r = nn.Parameter(torch.tensor(0.5))
+        self.gate_cross_d = nn.Parameter(torch.tensor(0.5))
+
+        # Project back to original channel counts
+        # We'll use a small linear inside PatchUnembed but need to create it after we know Hp/Wp - so build later dynamically
+        self._out_proj = None  # placeholder
 
     def _ensure_unembed(self, Hp, Wp, in_ch_r, in_ch_t, device):
-        if self._out_proj_rgb is None or self._out_proj_rgb.Hp != Hp:
-            self._out_proj_rgb = PatchUnembedConv(embed_dim=self.rgb_patch.proj.out_channels,
-                                                  out_ch=in_ch_r,
-                                                  patch_size=self.patch_size,
-                                                  Hp=Hp, Wp=Wp).to(device)
-        if self._out_proj_dep is None or self._out_proj_dep.Hp != Hp:
-            self._out_proj_dep = PatchUnembedConv(embed_dim=self.dep_patch.proj.out_channels,
-                                                  out_ch=in_ch_t,
-                                                  patch_size=self.patch_size,
-                                                  Hp=Hp, Wp=Wp).to(device)
+        if (self._out_proj is None) or (self._out_proj.Hp != Hp):
+            self._out_proj = PatchUnembedConv(embed_dim=self.rgb_patch.proj.out_channels,
+                                              out_ch=in_ch_r,
+                                              patch_size=self.patch_size,
+                                              Hp=Hp, Wp=Wp)
+            # move to device
+            self._out_proj.to(device)
 
-    def forward(self, Ri: torch.Tensor, Ti: torch.Tensor):
+    def forward(self, Ri: torch.Tensor, Ti: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Ri: (B, Cr, H, W)
-        Ti: (B, Ct, H, W)
-        Returns: Fr, Ft (same shapes as Ri, Ti)
+        Ri: (B, C_r, H, W)
+        Ti: (B, C_t, H, W)
+        returns: Fr, Ft same shapes as Ri and Ti
         """
         B, Cr, H, W = Ri.shape
         B2, Ct, H2, W2 = Ti.shape
-        assert B == B2 and H == H2 and W == W2
+        assert B == B2 and H == H2 and W == W2, "Inputs must have same batch and spatial dims"
         device = Ri.device
 
-        # Patchify
+        # Patchify both
         rgb_tokens, (Hp, Wp) = self.rgb_patch(Ri)  # (L, B, E)
         dep_tokens, _ = self.dep_patch(Ti)
 
-        # Create unembedders
+        # L = rgb_tokens.shape[0]
+        # ensure unembed modules created
         self._ensure_unembed(Hp, Wp, Cr, Ct, device)
 
-        # === RGB stream ===
-        rgb_norm = self.norm_rgb_self(rgb_tokens)
-        rgb_self = self.rgb_self_attn(rgb_norm, rgb_norm, rgb_norm)
-        rgb_self = self.gate_rgb_self * rgb_self
+        # --- RGB stream ---
 
-        rgb_q = self.norm_rgb_cross_q(rgb_tokens)
-        dep_kv = self.norm_rgb_cross_kv(dep_tokens)
-        rgb_cross = self.rgb_cross_attn(rgb_q, dep_kv, dep_kv)
-        rgb_cross = self.gate_rgb_cross * rgb_cross
+        rgb_tokens = self.ln_rgb(rgb_tokens)
+        dep_tokens = self.ln_dep(dep_tokens)
 
-        rgb_out = rgb_tokens + rgb_self + rgb_cross
-        rgb_out = rgb_out + self.ffn_rgb(rgb_out)
+        # Self-attn (pre-LN style already applied in PatchEmbedConv)
+        rgb_self = self.rgb_self_attn(rgb_tokens, rgb_tokens, rgb_tokens)
+        dep_self = self.dep_self_attn(dep_tokens, dep_tokens, dep_tokens)
 
-        # === Depth stream ===
-        dep_norm = self.norm_dep_self(dep_tokens)
-        dep_self = self.dep_self_attn(dep_norm, dep_norm, dep_norm)
-        dep_self = self.gate_dep_self * dep_self
+        # gated fusion of self-attn
+        self_attention = self.gate_self_r * rgb_self + self.gate_self_d * dep_self
 
-        dep_q = self.norm_dep_cross_q(dep_tokens)
-        rgb_kv = self.norm_dep_cross_kv(rgb_tokens)
-        dep_cross = self.dep_cross_attn(dep_q, rgb_kv, rgb_kv)
-        dep_cross = self.gate_dep_cross * dep_cross
+        # Cross-attn: rgb queries, depth key/value
+        rgb_cross = self.rgb_cross_attn(rgb_tokens, dep_tokens, dep_tokens)
+        dep_cross = self.dep_cross_attn(dep_tokens, rgb_tokens, rgb_tokens)
 
-        dep_out = dep_tokens + dep_self + dep_cross
-        dep_out = dep_out + self.ffn_dep(dep_out)
+        # gated fusion of cross-attn
+        cross_attention = self.gate_cross_r * rgb_cross + self.gate_cross_d * dep_cross
 
-        # Unpatchify + residual
-        Fr = self._out_proj_rgb(rgb_out, (H, W)) + Ri
-        Ft = self._out_proj_dep(dep_out, (H, W)) + Ti
+        o = self_attention + cross_attention + rgb_tokens
 
-        return Fr, Ft
+        m = self.mlp(o)
+
+        f = self._out_proj(m, (H, W)) + Ri
+
+        return f
 
 
 # ==================================================================
@@ -753,35 +761,35 @@ class BBSNetTransformerAttention(BaseModel):
         x_depth = self.resnet_depth.maxpool(x_depth)
 
         # ---- layer0 fusion (64ch) ----
-        x, x_depth = self.fuse0(x, x_depth)
+        x = self.fuse0(x, x_depth)
 
         # layer1
         x1 = self.resnet.layer1(x)
         x1_depth = self.resnet_depth.layer1(x_depth)
 
         # ---- layer1 fusion (256ch) ----
-        x1, x1_depth = self.fuse1(x1, x1_depth)
+        x1 = self.fuse1(x1, x1_depth)
 
         # layer2
         x2 = self.resnet.layer2(x1)
         x2_depth = self.resnet_depth.layer2(x1_depth)
 
         # ---- layer2 fusion (512ch) ----
-        x2, x2_depth = self.fuse2(x2, x2_depth)
+        x2 = self.fuse2(x2, x2_depth)
 
         # layer3_1
         x3_1 = self.resnet.layer3_1(x2)
         x3_1_depth = self.resnet_depth.layer3_1(x2_depth)
 
         # ---- layer3_1 fusion (1024ch) ----
-        x3_1, x3_1_depth = self.fuse3_1(x3_1, x3_1_depth)
+        x3_1 = self.fuse3_1(x3_1, x3_1_depth)
 
         # layer4_1
         x4_1 = self.resnet.layer4_1(x3_1)
         x4_1_depth = self.resnet_depth.layer4_1(x3_1_depth)
 
         # ---- layer4_1 fusion (2048ch) ----
-        x4_1, x4_1_depth = self.fuse4_1(x4_1, x4_1_depth)
+        x4_1 = self.fuse4_1(x4_1, x4_1_depth)
 
         # produce initial saliency map by decoder1
         x2_1 = self.rfb2_1(x2)
