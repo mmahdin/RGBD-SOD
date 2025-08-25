@@ -1,11 +1,10 @@
 from data import get_loader, test_dataset
-from optionsBBS import opt
+from options import opt
 import torch.backends.cudnn as cudnn
 import logging
 from tensorboardX import SummaryWriter
 from utils import clip_gradient, adjust_lr
-# from models.BBSNet_model import BBSNetTransformerAttention as BBSNet
-from models.BBSNet_model import BBSNetChannelSpatialAttention as BBSNet
+from models.BBSNet_model import BBSNetTransformerAttention as BBSNet
 from torchvision.utils import make_grid
 from datetime import datetime
 import numpy as np

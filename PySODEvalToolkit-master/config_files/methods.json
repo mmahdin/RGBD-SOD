@@ -1,0 +1,16 @@
+{
+    "patchify_light_pos_embed": {
+        "NJU2K": {
+            "path": "../pred/patchify_light_pos_embed/NJU2K",
+            "prefix": "",
+            "suffix": ".png"
+        }
+    },
+    "bbsnet": {
+        "NJU2K": {
+            "path": "../pred/bbsnet/NJU2K",
+            "prefix": "",
+            "suffix": ".png"
+        }
+    }
+}

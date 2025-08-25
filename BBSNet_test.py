@@ -39,7 +39,7 @@ def restore_unembed_weights(model, pending_unembed):
             own_state[k].copy_(v)
 
 
-def test(method="BBSNetChannelSpatialAttention"):
+def test(method="patchify_light_pos_embed"):
     parser = argparse.ArgumentParser()
     parser.add_argument("--testsize", type=int,
                         default=352, help="testing size")
@@ -66,7 +66,7 @@ def test(method="BBSNetChannelSpatialAttention"):
     # load the model
     model = BBSNet()
     checkpoint = torch.load(
-        "BBSNet_cpts/patchify_light_pos_embed/BBSNet_epoch_best.pth")
+        f"BBSNet_cpts/{method}/BBSNet_epoch_best.pth")
 
     # lazy load weights
     pending_unembed = load_model_with_lazy_unembed(model, checkpoint)

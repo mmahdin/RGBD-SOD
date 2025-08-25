@@ -5,3 +5,5 @@ models/__pycache__/ResNet.cpython-312.pyc
 gt/
 pred/
 score/
+PySODEvalToolkit-master/sod/
+

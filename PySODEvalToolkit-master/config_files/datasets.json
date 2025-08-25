@@ -1,0 +1,9 @@
+{
+    "NJU2K": {
+        "mask": {
+            "path": "../gt/NJU2K",
+            "prefix": "",
+            "suffix": ".png"
+        }
+    }
+}
