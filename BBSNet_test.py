@@ -66,7 +66,7 @@ def test(method="BBSNetChannelSpatialAttention"):
     # load the model
     model = BBSNet()
     checkpoint = torch.load(
-        "BBSNet_cpts/patchify_light_pos_embed_gated/BBSNet_epoch_best.pth")
+        "BBSNet_cpts/patchify_light_pos_embed/BBSNet_epoch_best.pth")
 
     # lazy load weights
     pending_unembed = load_model_with_lazy_unembed(model, checkpoint)

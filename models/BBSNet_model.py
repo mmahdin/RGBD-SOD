@@ -388,7 +388,7 @@ class RGBDViTBlock(nn.Module):
                  embed_dim: int = 256,
                  num_heads: int = 8,
                  patch_size: int = 4,
-                 mlp_ratio: float = 8.0,
+                 mlp_ratio: float = 4.0,
                  attn_dropout: float = 0.0,
                  dropout: float = 0.0):
         super().__init__()
@@ -409,21 +409,9 @@ class RGBDViTBlock(nn.Module):
         self.dep_cross_attn = CrossMultiHeadAttention(
             embed_dim, num_heads, attn_dropout)
 
-        # LayerNorm (pre-norm)
-        self.ln_rgb = nn.LayerNorm(embed_dim)
-        self.ln_dep = nn.LayerNorm(embed_dim)
-        self.ln_fusion = nn.LayerNorm(embed_dim)
-
         # MLPs
         hidden_dim = int(embed_dim * mlp_ratio)
         self.mlp = FeedForward(embed_dim, hidden_dim, dropout)
-
-        # Learnable gates for self-attn and cross-attn fusion
-        self.gate_self_r = nn.Parameter(torch.tensor(0.5))
-        self.gate_self_d = nn.Parameter(torch.tensor(0.5))
-
-        self.gate_cross_r = nn.Parameter(torch.tensor(0.5))
-        self.gate_cross_d = nn.Parameter(torch.tensor(0.5))
 
         # Project back to original channel counts
         # We'll use a small linear inside PatchUnembed but need to create it after we know Hp/Wp - so build later dynamically
@@ -458,23 +446,15 @@ class RGBDViTBlock(nn.Module):
         self._ensure_unembed(Hp, Wp, Cr, Ct, device)
 
         # --- RGB stream ---
-
-        rgb_tokens = self.ln_rgb(rgb_tokens)
-        dep_tokens = self.ln_dep(dep_tokens)
-
         # Self-attn (pre-LN style already applied in PatchEmbedConv)
         rgb_self = self.rgb_self_attn(rgb_tokens, rgb_tokens, rgb_tokens)
         dep_self = self.dep_self_attn(dep_tokens, dep_tokens, dep_tokens)
-
-        # gated fusion of self-attn
-        self_attention = self.gate_self_r * rgb_self + self.gate_self_d * dep_self
+        self_attention = rgb_self + dep_self
 
         # Cross-attn: rgb queries, depth key/value
         rgb_cross = self.rgb_cross_attn(rgb_tokens, dep_tokens, dep_tokens)
         dep_cross = self.dep_cross_attn(dep_tokens, rgb_tokens, rgb_tokens)
-
-        # gated fusion of cross-attn
-        cross_attention = self.gate_cross_r * rgb_cross + self.gate_cross_d * dep_cross
+        cross_attention = rgb_cross + dep_cross
 
         o = self_attention + cross_attention + rgb_tokens
 
@@ -753,66 +733,68 @@ class BBSNetTransformerAttention(BaseModel):
         x = self.resnet.conv1(x)
         x = self.resnet.bn1(x)
         x = self.resnet.relu(x)
-        x = self.resnet.maxpool(x)
+        x = self.resnet.maxpool(x)  # [1, 64, 88, 88]
 
         x_depth = self.resnet_depth.conv1(x_depth)
         x_depth = self.resnet_depth.bn1(x_depth)
         x_depth = self.resnet_depth.relu(x_depth)
-        x_depth = self.resnet_depth.maxpool(x_depth)
+        x_depth = self.resnet_depth.maxpool(x_depth)  # [1, 64, 88, 88]
 
         # ---- layer0 fusion (64ch) ----
-        x = self.fuse0(x, x_depth)
+        x = self.fuse0(x, x_depth)  # [1, 64, 88, 88]
 
         # layer1
-        x1 = self.resnet.layer1(x)
-        x1_depth = self.resnet_depth.layer1(x_depth)
+        x1 = self.resnet.layer1(x)  # [1, 256, 88, 88]
+        x1_depth = self.resnet_depth.layer1(x_depth)  # [1, 256, 88, 88]
 
         # ---- layer1 fusion (256ch) ----
-        x1 = self.fuse1(x1, x1_depth)
+        x1 = self.fuse1(x1, x1_depth)  # [1, 256, 88, 88]
 
         # layer2
-        x2 = self.resnet.layer2(x1)
-        x2_depth = self.resnet_depth.layer2(x1_depth)
+        x2 = self.resnet.layer2(x1)  # [1, 512, 44, 44]
+        x2_depth = self.resnet_depth.layer2(x1_depth)  # [1, 512, 44, 44]
 
         # ---- layer2 fusion (512ch) ----
-        x2 = self.fuse2(x2, x2_depth)
+        x2 = self.fuse2(x2, x2_depth)  # [1, 512, 44, 44]
 
         # layer3_1
-        x3_1 = self.resnet.layer3_1(x2)
-        x3_1_depth = self.resnet_depth.layer3_1(x2_depth)
+        x3_1 = self.resnet.layer3_1(x2)  # [1, 1024, 22, 22]
+        x3_1_depth = self.resnet_depth.layer3_1(x2_depth)  # [1, 1024, 22, 22]
 
         # ---- layer3_1 fusion (1024ch) ----
-        x3_1 = self.fuse3_1(x3_1, x3_1_depth)
+        x3_1 = self.fuse3_1(x3_1, x3_1_depth)  # [1, 1024, 22, 22]
 
         # layer4_1
-        x4_1 = self.resnet.layer4_1(x3_1)
-        x4_1_depth = self.resnet_depth.layer4_1(x3_1_depth)
+        x4_1 = self.resnet.layer4_1(x3_1)  # [1, 2048, 11, 11]
+        x4_1_depth = self.resnet_depth.layer4_1(
+            x3_1_depth)  # [1, 2048, 11, 11]
 
         # ---- layer4_1 fusion (2048ch) ----
-        x4_1 = self.fuse4_1(x4_1, x4_1_depth)
+        x4_1 = self.fuse4_1(x4_1, x4_1_depth)  # [1, 2048, 11, 11]
 
         # produce initial saliency map by decoder1
-        x2_1 = self.rfb2_1(x2)
-        x3_1 = self.rfb3_1(x3_1)
-        x4_1 = self.rfb4_1(x4_1)
+        x2_1 = self.rfb2_1(x2)  # [1, 32, 44, 44]
+        x3_1 = self.rfb3_1(x3_1)  # [1, 32, 22, 22]
+        x4_1 = self.rfb4_1(x4_1)  # [1, 32, 11, 11]
 
-        attention_map = self.agg1(x4_1, x3_1, x2_1)
+        attention_map = self.agg1(x4_1, x3_1, x2_1)  # [1, 1, 44, 44]
 
         # Refine low-layer features by initial map
+        # [1, 64, 88, 88], [1, 256, 88, 88], [1, 512, 44, 44]
         x, x1, x5 = self.HA(attention_map.sigmoid(), x, x1, x2)
 
         # produce final saliency map by decoder2
-        x0_2 = self.rfb0_2(x)
-        x1_2 = self.rfb1_2(x1)
-        x5_2 = self.rfb5_2(x5)
+        x0_2 = self.rfb0_2(x)  # [1, 32, 88, 88]
+        x1_2 = self.rfb1_2(x1)  # [1, 32, 88, 88]
+        x5_2 = self.rfb5_2(x5)  # [1, 32, 44, 44]
 
-        y = self.agg2(x5_2, x1_2, x0_2)
+        y = self.agg2(x5_2, x1_2, x0_2)  # [1, 96, 88, 88]
 
         # PTM module
-        y = self.agant1(y)
-        y = self.deconv1(y)
-        y = self.agant2(y)
-        y = self.deconv2(y)
-        y = self.out2_conv(y)
+        y = self.agant1(y)  # [1, 64, 88, 88]
+        y = self.deconv1(y)  # [1, 64, 176, 176]
+        y = self.agant2(y)  # [1, 32, 176, 176]
+        y = self.deconv2(y)  # [1, 32, 352, 352]
+        y = self.out2_conv(y)  # [1, 1, 352, 352]
 
         return self.upsample(attention_map), y
