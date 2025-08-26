@@ -575,17 +575,17 @@ class SelfAttnBlock(nn.Module):
         self.norm1 = nn.LayerNorm(dim)
         self.attn = nn.MultiheadAttention(
             embed_dim=dim, num_heads=num_heads, dropout=attn_drop, batch_first=True)
-        self.drop = nn.Dropout(drop)
-        self.norm2 = nn.LayerNorm(dim)
-        self.mlp = MLP(dim, mlp_ratio, drop)
+        # self.drop = nn.Dropout(drop)
+        # self.norm2 = nn.LayerNorm(dim)
+        # self.mlp = MLP(dim, mlp_ratio, drop)
 
     def forward(self, x):
         # x: [B,N,D]
         x_norm = self.norm1(x)
         attn_out, _ = self.attn(x_norm, x_norm, x_norm, need_weights=False)
-        x = x + self.drop(attn_out)
-        x = x + self.mlp(self.norm2(x))
-        return x
+        # x = x + self.drop(attn_out)
+        # x = x + self.mlp(self.norm2(x))
+        return attn_out
 
 
 class TransformerEncoder(nn.Module):
@@ -620,10 +620,10 @@ class CrossAttnBlock(nn.Module):
         self.attn = nn.MultiheadAttention(
             embed_dim=dim, num_heads=num_heads, dropout=attn_drop, batch_first=True
         )
-        self.drop = nn.Dropout(drop)
+        # self.drop = nn.Dropout(drop)
 
         # Feedforward
-        self.mlp = MLP(dim, mlp_ratio, drop)
+        # self.mlp = MLP(dim, mlp_ratio, drop)
 
     def forward(self, x, y):
         """
@@ -638,11 +638,11 @@ class CrossAttnBlock(nn.Module):
         q = self.q_norm(x)
         kv = self.kv_norm(y)
         attn_out, _ = self.attn(q, kv, kv, need_weights=False)
-        x = x + self.drop(attn_out)
+        # x = x + self.drop(attn_out)
 
         # Feedforward
-        x = x + self.mlp(self.norm2(x))
-        return x
+        # x = x + self.mlp(self.norm2(x))
+        return attn_out
 
 
 class CrossAttnEncoder(nn.Module):
@@ -1041,12 +1041,6 @@ class BBSNetTransformerAttention(BaseModel):
             depth=depth[4], mlp_ratio=mlp_ratio[4], drop=proj_drop[4], attn_drop=attn_drop[4],
             self_depth=self_depth[4], cross_depth=cross_depth[4]
         )
-
-        self.atten_depth_channel_0 = ChannelAttention(64)
-        self.atten_depth_channel_1 = ChannelAttention(256)
-        self.atten_depth_channel_2 = ChannelAttention(512)
-        self.atten_depth_channel_3_1 = ChannelAttention(1024)
-        self.atten_depth_channel_4_1 = ChannelAttention(2048)
 
         if self.training:
             self.initialize_weights()
