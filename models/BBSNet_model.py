@@ -681,11 +681,11 @@ class XModalFusionBlock(nn.Module):
             dim, cross_depth, num_heads, drop, attn_drop, mlp_ratio)
 
         # gates (scalar version, could also be vector)
-        self.gate_rgb = nn.Parameter(torch.zeros(1))
-        self.gate_dep = nn.Parameter(torch.zeros(1))
+        self.gate_rgb = nn.Sequential(nn.Linear(dim, dim), nn.Sigmoid())
+        self.gate_dep = nn.Sequential(nn.Linear(dim, dim), nn.Sigmoid())
 
         # norm + MLP
-        self.norm = nn.LayerNorm(dim)
+        # self.norm = nn.LayerNorm(dim)
         self.mlp = MLP(dim, mlp_ratio, drop=drop)
 
     def forward(self, rgb, dep):
@@ -697,15 +697,13 @@ class XModalFusionBlock(nn.Module):
         c_rgb = self.rgb_from_dep(s_rgb, s_dep)
         c_dep = self.dep_from_rgb(s_dep, s_rgb)
 
-        # gates
-        g_rgb = torch.sigmoid(self.gate_rgb)
-        g_dep = torch.sigmoid(self.gate_dep)
+        g_rgb = self.gate_rgb(c_rgb)  # Now [B, N, D]
+        g_dep = self.gate_dep(c_dep)
 
         # gated fusion
         z = s_rgb + s_dep + g_rgb * c_rgb + g_dep * c_dep
 
         # norm + mlp (residual style)
-        z = self.norm(z)
         z = z + self.mlp(z)
         return z
 
@@ -792,6 +790,9 @@ class RGBDTransformerFusion(nn.Module):
         return fused + feat_rgb
 
 
+# =========================
+# Swin Fusion Blocks
+# =========================
 class RGBDFusion4Swin(nn.Module):
     """
     Transformer-based RGB-D fusion that keeps input spatial size & channels.
@@ -1165,9 +1166,9 @@ class BBSNetTransformerAttention(BaseModel):
 
         heads = (4, 4, 8, 8, 8)
         embed_dim = (32, 64, 128, 128, 128)  # embed_dim for each stage
-        depth = [2]*5
-        self_depth = [2]*5
-        cross_depth = [1]*5
+        depth = [1]*5
+        self_depth = [1]*5
+        cross_depth = [2]*5
         mlp_ratio = [4]*5
         attn_drop = [0.1]*5
         proj_drop = [0.1]*5
@@ -1298,12 +1299,12 @@ class BBSNetSwin(BaseModel):
         C = [128, 256, 512, 1024, 2048]           # channel dims from ResNet
 
         # you can also set per stage (smaller patch for early layers)
-        patch_size = [12, 12, 12, 6, 3]
+        patch_size = [12, 12, 6, 6, 3]
 
         self.rgb_swin = SwinTransformer(
-            embed_dim=128, depths=[2, 2, 2, 2, 2], num_heads=[4, 8, 16, 32, 32])
+            embed_dim=128, depths=[2, 2, 2, 6, 2], num_heads=[4, 8, 16, 32, 32])
         self.depth_swin = SwinTransformer(
-            embed_dim=128, depths=[2, 2, 2, 2, 2], num_heads=[4, 8, 16, 32, 32], in_chans=1)
+            embed_dim=128, depths=[2, 2, 2, 6, 2], num_heads=[4, 8, 16, 32, 32], in_chans=1)
 
         # Replace FusionBlock2D with RGBDViTBlock
         self.fuse0 = RGBDFusion4Swin(
