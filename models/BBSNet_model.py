@@ -5,7 +5,7 @@ from torchvision.models import resnet50, ResNet50_Weights
 import torch
 import torch.nn as nn
 from models.ResNet import ResNet50
-from swin_transformer import SwinTransformer
+from models.swin_transformer import SwinTransformer
 
 
 def conv3x3(in_planes, out_planes, stride=1):
@@ -662,10 +662,11 @@ class CrossAttnEncoder(nn.Module):
 
 class XModalFusionBlock(nn.Module):
     """
-    One stage:
+    Fusion with RGB as primary modality:
       1) Self-attn on rgb and depth separately
-      2) Cross-attn both directions
-      3) Fuse outputs (concat + linear) or gated sum
+      2) Compute difference features |s_rgb - s_dep|
+      3) Cross-attn: RGB queries, KV from [Depth + Diff]
+      4) Fuse outputs (residual + MLP)
     """
 
     def __init__(self, dim, num_heads=8, mlp_ratio=4.0, drop=0.0,
@@ -675,37 +676,31 @@ class XModalFusionBlock(nn.Module):
             dim, self_depth, num_heads, drop, attn_drop, mlp_ratio)
         self.dep_self = TransformerEncoder(
             dim, self_depth, num_heads, drop, attn_drop, mlp_ratio)
+
+        # Only RGB is refined by Depth (asymmetric fusion)
         self.rgb_from_dep = CrossAttnEncoder(
             dim, cross_depth, num_heads, drop, attn_drop, mlp_ratio)
-        self.dep_from_rgb = CrossAttnEncoder(
-            dim, cross_depth, num_heads, drop, attn_drop, mlp_ratio)
 
-        # gates (scalar version, could also be vector)
-        self.gate_rgb = nn.Sequential(nn.Linear(dim, dim), nn.Sigmoid())
-        self.gate_dep = nn.Sequential(nn.Linear(dim, dim), nn.Sigmoid())
-
-        # norm + MLP
-        # self.norm = nn.LayerNorm(dim)
+        self.norm = nn.LayerNorm(dim)
         self.mlp = MLP(dim, mlp_ratio, drop=drop)
 
     def forward(self, rgb, dep):
-        # self-attention
+        # 1) Self-attention
         s_rgb = self.rgb_self(rgb)
         s_dep = self.dep_self(dep)
 
-        # cross attention
-        c_rgb = self.rgb_from_dep(s_rgb, s_dep)
-        c_dep = self.dep_from_rgb(s_dep, s_rgb)
+        # 2) Difference features
+        diff = torch.abs(s_rgb - s_dep)   # [B, N, D]
 
-        g_rgb = self.gate_rgb(c_rgb)  # Now [B, N, D]
-        g_dep = self.gate_dep(c_dep)
+        # 3) Cross-attn (RGB queries, KV from depth + diff)
+        kv = torch.cat([s_dep, diff], dim=1)  # [B, 2N, D]
+        c_rgb = self.rgb_from_dep(s_rgb, kv)
 
-        # gated fusion
-        z = s_rgb + s_dep + g_rgb * c_rgb + g_dep * c_dep
+        # 4) Residual fusion: RGB refined by depth
+        z_rgb = s_rgb + c_rgb
+        z_rgb = z_rgb + self.mlp(self.norm(z_rgb))
 
-        # norm + mlp (residual style)
-        z = z + self.mlp(z)
-        return z
+        return z_rgb
 
 
 class RGBDTransformerFusion(nn.Module):
