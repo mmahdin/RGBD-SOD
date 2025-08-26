@@ -267,38 +267,41 @@ class SwinTransformerBlock(nn.Module):
         self.register_buffer("attn_mask", attn_mask)
 
     def forward(self, x):
-        # 输入此的x是整图
+        # x: [1, 9216, 128]
+
         H, W = self.input_resolution
         B, L, C = x.shape
         assert L == H * W, "input feature has wrong size"
 
         shortcut = x
         x = self.norm1(x)
-        x = x.view(B, H, W, C)
+        x = x.view(B, H, W, C)  # [1, 96, 96, 128]
 
         # cyclic shift
         if self.shift_size > 0:
-
+            # [1, 96, 96, 128]
             shifted_x = torch.roll(
                 x, shifts=(-self.shift_size, -self.shift_size), dims=(1, 2))
         else:
             shifted_x = x
 
         # partition windows
-        # nW*B, window_size, window_size, C
+        # (num_windows*B, window_size, window_size, C): [64, 12, 12, 128]
         x_windows = window_partition(shifted_x, self.window_size)
-        # nW*B, window_size*window_size, C
+
+        # (num_windows*B, window_size*window_size, C): [64, 12*12, 128]
         x_windows = x_windows.view(-1, self.window_size * self.window_size, C)
 
         # W-MSA/SW-MSA
-        # nW*B, window_size*window_size, C
-        attn_windows = self.attn(x_windows, mask=self.attn_mask)
+
+        attn_windows = self.attn(
+            x_windows, mask=self.attn_mask)  # [64, 144, 128]
 
         # merge windows
         attn_windows = attn_windows.view(-1,
                                          self.window_size, self.window_size, C)
         shifted_x = window_reverse(
-            attn_windows, self.window_size, H, W)  # B H' W' C
+            attn_windows, self.window_size, H, W)  # [1, 96, 96, 128]
 
         # reverse cyclic shift
         if self.shift_size > 0:
@@ -310,8 +313,7 @@ class SwinTransformerBlock(nn.Module):
 
         # FFN
         x = shortcut + self.drop_path(x)
-        x = x + self.drop_path(self.mlp(self.norm2(x)))
-        # print('FFN',x.shape)
+        x = x + self.drop_path(self.mlp(self.norm2(x)))  # [1, 9216, 128]
         return x
 
     def extra_repr(self) -> str:
@@ -434,14 +436,15 @@ class BasicLayer(nn.Module):
             self.downsample = None
 
     def forward(self, x):
+        # x: [1, 9216, 128]
 
         for blk in self.blocks:
             if self.use_checkpoint:
                 x = checkpoint.checkpoint(blk, x)
             else:
-                x = blk(x)
+                x = blk(x)  # [1, 9216, 128]
         if self.downsample is not None:
-            x = self.downsample(x)
+            x = self.downsample(x)  # [1, 2304, 256]
         return x
 
     def extra_repr(self) -> str:
@@ -601,30 +604,34 @@ class SwinTransformer(nn.Module):
         return {'relative_position_bias_table'}
 
     def forward_features(self, x):
+        # x: [1, 3, 384, 384]
+
         layer_features = []
-        x = self.patch_embed(x)
+        x = self.patch_embed(x)  # [1, 9216, 128]
+
         B, L, C = x.shape
+
+        # [1, 96, 96, 128] --> [1, 128, 96, 96]
         layer_features.append(x.view(B, int(np.sqrt(L)), int(
             np.sqrt(L)), -1).permute(0, 3, 1, 2).contiguous())
+
         # layer_features.append(x)
         if self.ape:
             x = x + self.absolute_pos_embed
-        x = self.pos_drop(x)
+        x = self.pos_drop(x)  # [1, 9216, 128]
 
         for layer in self.layers:
             x = layer(x)
-            B, L, C = x.shape
-            # print('x:', x.shape)
+            B, L, C = x.shape  # [1, 2304, 256]
             xl = x.view(B, int(np.sqrt(L)), int(np.sqrt(L)), -
                         1).permute(0, 3, 1, 2).contiguous()
-            # print('xl',xl.shape)
-            layer_features.append(xl)
-        x = self.norm(x)  # B L C
+            layer_features.append(xl)  # [1, 256, 48, 48]
+
+        x = self.norm(x)  # [1, 144, 1024]
         B, L, C = x.shape
-        # x = self.avgpool(x.ranspose(1, 2))  # B C 1
         x = x.view(B, int(np.sqrt(L)), int(np.sqrt(L)), -
-                   1).permute(0, 3, 1, 2).contiguous()
-        # x = torch.flatten(x, 1)
+                   1).permute(0, 3, 1, 2).contiguous()  # [1, 1024, 12, 12]
+
         layer_features[-1] = x
 
         return layer_features

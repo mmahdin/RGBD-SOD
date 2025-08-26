@@ -5,7 +5,8 @@ import logging
 from tensorboardX import SummaryWriter
 from utils import clip_gradient, adjust_lr
 # from models.BBSNet_model import BBSNetChannelSpatialAttention as BBSNet
-from models.BBSNet_model import BBSNetTransformerAttention as BBSNet
+# from models.BBSNet_model import BBSNetTransformerAttention as BBSNet
+from models.BBSNet_model import BBSNetSwin as BBSNet
 from torchvision.utils import make_grid
 from datetime import datetime
 import numpy as np
