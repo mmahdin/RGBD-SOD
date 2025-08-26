@@ -4,7 +4,7 @@ import torch.backends.cudnn as cudnn
 import logging
 from tensorboardX import SummaryWriter
 from utils import clip_gradient, adjust_lr
-# from models.BBSNet_model import BBSNetChannelSpatialAttention as BBSNet 
+# from models.BBSNet_model import BBSNetChannelSpatialAttention as BBSNet
 from models.BBSNet_model import BBSNetTransformerAttention as BBSNet
 from torchvision.utils import make_grid
 from datetime import datetime
@@ -63,8 +63,10 @@ def get_data():
 
     # load data
     print('load data...')
-    train_loader = get_loader(image_root, gt_root, depth_root, batchsize=opt.batchsize, trainsize=opt.trainsize)
-    test_loader = test_dataset( test_image_root, test_gt_root, test_depth_root, opt.trainsize)
+    train_loader = get_loader(
+        image_root, gt_root, depth_root, batchsize=opt.batchsize, trainsize=opt.trainsize)
+    test_loader = test_dataset(
+        test_image_root, test_gt_root, test_depth_root, opt.trainsize)
     total_step = len(train_loader)
 
     logging.basicConfig(filename=save_path+'log.log',
@@ -73,7 +75,7 @@ def get_data():
     logging.info("Config")
     logging.info('epoch:{};lr:{};batchsize:{};trainsize:{};clip:{};decay_rate:{};load:{};save_path:{};decay_epoch:{}'.format(
         opt.epoch, opt.lr, opt.batchsize, opt.trainsize, opt.clip, opt.decay_rate, opt.load, save_path, opt.decay_epoch))
-    
+
     return train_loader, test_loader, total_step
 
 
@@ -107,18 +109,22 @@ def train(train_loader, model, optimizer, epoch, save_path, CE, total_step):
                 logging.info('#TRAIN#:Epoch [{:03d}/{:03d}], Step [{:04d}/{:04d}], Loss1: {:.4f} Loss2: {:0.4f}'.
                              format(epoch, opt.epoch, i, total_step, loss1.data, loss2.data))
                 writer.add_scalar('Loss', loss.data, global_step=step)
-                grid_image = make_grid(images[0].clone().cpu().data, 1, normalize=True)
+                grid_image = make_grid(
+                    images[0].clone().cpu().data, 1, normalize=True)
                 writer.add_image('RGB', grid_image, step)
-                grid_image = make_grid( gts[0].clone().cpu().data, 1, normalize=True)
+                grid_image = make_grid(
+                    gts[0].clone().cpu().data, 1, normalize=True)
                 writer.add_image('Ground_truth', grid_image, step)
                 res = s1[0].clone()
                 res = res.sigmoid().data.cpu().numpy().squeeze()
                 res = (res - res.min()) / (res.max() - res.min() + 1e-8)
-                writer.add_image('s1', torch.tensor(res),step, dataformats='HW')
+                writer.add_image('s1', torch.tensor(res),
+                                 step, dataformats='HW')
                 res = s2[0].clone()
                 res = res.sigmoid().data.cpu().numpy().squeeze()
                 res = (res - res.min()) / (res.max() - res.min() + 1e-8)
-                writer.add_image('s2', torch.tensor(res), step, dataformats='HW')
+                writer.add_image('s2', torch.tensor(res),
+                                 step, dataformats='HW')
 
         loss_all /= epoch_step
         logging.info(
@@ -149,7 +155,8 @@ def test(test_loader, model, epoch, save_path):
             image = image.cuda()
             depth = depth.cuda()
             _, res = model(image, depth)
-            res = F.interpolate(res, size=gt.shape, mode='bilinear', align_corners=False)
+            res = F.interpolate(res, size=gt.shape,
+                                mode='bilinear', align_corners=False)
             res = res.sigmoid().data.cpu().numpy().squeeze()
             res = (res - res.min()) / (res.max() - res.min() + 1e-8)
             mae_sum += np.sum(np.abs(res-gt))*1.0/(gt.shape[0]*gt.shape[1])
@@ -176,5 +183,6 @@ def main(optimizer, model, train_loader, test_loader, CE, total_step):
         cur_lr = adjust_lr(optimizer, opt.lr, epoch,
                            opt.decay_rate, opt.decay_epoch)
         writer.add_scalar('learning_rate', cur_lr, global_step=epoch)
-        train(train_loader, model, optimizer, epoch, opt.save_path, CE, total_step)
+        train(train_loader, model, optimizer,
+              epoch, opt.save_path, CE, total_step)
         test(test_loader, model, epoch, opt.save_path)

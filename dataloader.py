@@ -3,6 +3,7 @@ import torch
 import os
 from PIL import Image
 
+
 class EvalDataset(data.Dataset):
     def __init__(self, img_root, label_root):
         lst_label = sorted(os.listdir(label_root))

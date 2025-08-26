@@ -16,10 +16,10 @@ parser.add_argument('--decay_rate', type=float, default=0.1,
                     help='decay rate of learning rate')
 parser.add_argument('--decay_epoch', type=int, default=60,
                     help='every n epochs decay learning rate')
-# parser.add_argument('--load', type=str,
-#                     default=f'/content/drive/My Drive/sod/BBS-Net/BBSNet_cpts{version}/checkpoint.pth', help='train from checkpoints')
-parser.add_argument('--load', type=str, default=None,
-                    help='train from checkpoints')
+parser.add_argument('--load', type=str,
+                    default=f'/content/drive/My Drive/sod/BBS-Net/BBSNet_cpts{version}/checkpoint.pth', help='train from checkpoints')
+# parser.add_argument('--load', type=str, default=None,
+#                     help='train from checkpoints')
 parser.add_argument('--gpu_id', type=str, default='0', help='train use gpu')
 
 # ✅ Paths updated for Colab (Google Drive mount)
