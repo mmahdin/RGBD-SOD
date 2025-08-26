@@ -679,21 +679,34 @@ class XModalFusionBlock(nn.Module):
         self.dep_from_rgb = CrossAttnEncoder(
             dim, cross_depth, num_heads, drop, attn_drop, mlp_ratio)
 
-        self.fuse_proj = nn.Linear(2 * dim, dim)
+        # gates (scalar version, could also be vector)
+        self.gate_rgb = nn.Parameter(torch.zeros(1))
+        self.gate_dep = nn.Parameter(torch.zeros(1))
 
-        self.out_norm = nn.LayerNorm(dim)
+        # norm + MLP
+        self.norm = nn.LayerNorm(dim)
+        self.mlp = MLP(dim, mlp_ratio, drop=drop)
 
     def forward(self, rgb, dep):
-        # self-attention per modality
-        rgb = self.rgb_self(rgb)
-        dep = self.dep_self(dep)
-        # cross in both directions
-        rgb2 = self.rgb_from_dep(rgb, dep)
-        dep2 = self.dep_from_rgb(dep, rgb)
-        # fuse
-        z = torch.cat([rgb + dep, rgb2 + dep2], dim=-1)
-        z = self.fuse_proj(z)
-        return self.out_norm(z)
+        # self-attention
+        s_rgb = self.rgb_self(rgb)
+        s_dep = self.dep_self(dep)
+
+        # cross attention
+        c_rgb = self.rgb_from_dep(s_rgb, s_dep)
+        c_dep = self.dep_from_rgb(s_dep, s_rgb)
+
+        # gates
+        g_rgb = torch.sigmoid(self.gate_rgb)
+        g_dep = torch.sigmoid(self.gate_dep)
+
+        # gated fusion
+        z = s_rgb + s_dep + g_rgb * c_rgb + g_dep * c_dep
+
+        # norm + mlp (residual style)
+        z = self.norm(z)
+        z = z + self.mlp(z)
+        return z
 
 
 class RGBDTransformerFusion(nn.Module):
