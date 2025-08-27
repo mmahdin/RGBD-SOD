@@ -9,7 +9,7 @@
 from torch import nn
 import torch
 import torch.utils.checkpoint as checkpoint
-from timm.models.layers import DropPath, to_2tuple, trunc_normal_
+from timm.layers import DropPath, to_2tuple, trunc_normal_
 import numpy as np
 import torch.nn.functional as F
 

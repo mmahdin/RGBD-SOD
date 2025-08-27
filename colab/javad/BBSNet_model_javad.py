@@ -4,7 +4,6 @@ import torch.nn as nn
 from models.ResNet import ResNet50
 from torch.nn import functional as F
 from typing import Tuple
-from models.swin_transformer import BasicLayer
 
 
 def conv3x3(in_planes, out_planes, stride=1):
@@ -415,6 +414,7 @@ class RGBDViTBlock(nn.Module):
         self.mlp = FeedForward(embed_dim, hidden_dim, dropout)
 
         # Project back to original channel counts
+        # We'll use a small linear inside PatchUnembed but need to create it after we know Hp/Wp - so build later dynamically
         self._out_proj = None  # placeholder
 
     def _ensure_unembed(self, Hp, Wp, in_ch_r, in_ch_t, device):
@@ -437,15 +437,21 @@ class RGBDViTBlock(nn.Module):
         assert B == B2 and H == H2 and W == W2, "Inputs must have same batch and spatial dims"
         device = Ri.device
 
+        # Patchify both
         rgb_tokens, (Hp, Wp) = self.rgb_patch(Ri)  # (L, B, E)
         dep_tokens, _ = self.dep_patch(Ti)
 
+        # L = rgb_tokens.shape[0]
+        # ensure unembed modules created
         self._ensure_unembed(Hp, Wp, Cr, Ct, device)
 
+        # --- RGB stream ---
+        # Self-attn (pre-LN style already applied in PatchEmbedConv)
         rgb_self = self.rgb_self_attn(rgb_tokens, rgb_tokens, rgb_tokens)
         dep_self = self.dep_self_attn(dep_tokens, dep_tokens, dep_tokens)
         self_attention = rgb_self + dep_self
 
+        # Cross-attn: rgb queries, depth key/value
         rgb_cross = self.rgb_cross_attn(rgb_tokens, dep_tokens, dep_tokens)
         dep_cross = self.dep_cross_attn(dep_tokens, rgb_tokens, rgb_tokens)
         cross_attention = rgb_cross + dep_cross
@@ -456,109 +462,10 @@ class RGBDViTBlock(nn.Module):
 
         f = self._out_proj(m, (H, W)) + Ri
 
-        return f, torch.permute(m + rgb_tokens, (1, 0, 2))
+        return f
 
 
 # ==================================================================
-
-class MLP(nn.Module):
-    def __init__(self, dim, hidden_mult=4, drop=0.0):
-        super().__init__()
-        hidden = int(dim * hidden_mult)
-        self.fc1 = nn.Linear(dim, hidden)
-        self.act = nn.GELU()
-        self.fc2 = nn.Linear(hidden, dim)
-        self.drop = nn.Dropout(drop)
-
-    def forward(self, x):
-        x = self.fc1(x)
-        x = self.act(x)
-        x = self.drop(x)
-        x = self.fc2(x)
-        x = self.drop(x)
-        return x
-
-
-def _check_grid(N: int, grid_size: Tuple[int, int]):
-    H, W = grid_size
-    if H * W != N:
-        raise ValueError(f"N={N} tokens doesn't match grid HxW={H}x{W}={H*W}")
-
-
-class TransformerGCM(nn.Module):
-    """
-    Transformer-based reimplementation of GCM with multi-branch token mixers,
-    residual fusion, and optional unpatchify back to a feature map.
-
-    Inputs:
-      x_tokens: [B, N, D] (e.g., [1, 121, 128])
-      grid_size: (H, W) tokens (e.g., (11, 11))
-      If return_tokens=False, will unpatchify to [B, C_out, H*p, W*p] using patch_size=p.
-
-    Args:
-      dim: token embedding dim D
-      heads: attention heads per branch
-      out_channels: channels for the returned image-like tensor
-      patch_size: ViT patch size used before fusion (so 4 when 44/11=4)
-      mlp_ratio: MLP expansion
-    """
-
-    def __init__(
-        self,
-        dim: int = 128,
-        input_resolution=(11, 11),
-        window_size=1,
-        heads: int = 4,
-        depth=1,
-        out_channels: int = 32,
-        patch_size: int = 4,
-        mlp_ratio: float = 4.0,
-        output_shape=(44, 44),
-        attn_drop: float = 0.0,
-        proj_drop: float = 0.0,
-    ):
-        # input: [1, 121, 128]
-        # ouput: [1, 32, 44, 44]
-        #   dim: 128
-        #   input_resolution: sqrt(121)
-        #   window_size: Swin partition size
-        #   depth: number of Swin block
-        #   out_channels: 32
-        #   patch_size: same as fusion block
-        super().__init__()
-        self.dim = dim
-        self.heads = heads
-        self.patch_size = patch_size
-        self.out_channels = out_channels
-        self.input_resolution = input_resolution
-        self.output_shape = output_shape
-
-        self.branch1_attn = BasicLayer(
-            dim=dim, input_resolution=input_resolution,
-            depth=depth, num_heads=heads, window_size=window_size, mlp_ratio=mlp_ratio
-        )
-
-        self._out_proj = PatchUnembedConv(embed_dim=dim,
-                                          out_ch=out_channels,
-                                          patch_size=self.patch_size,
-                                          Hp=input_resolution[0], Wp=input_resolution[0])
-
-    def forward(
-        self,
-        x_tokens: torch.Tensor,
-    ):
-        """
-        x_tokens: [B, N, D]
-        grid_size: (H, W) token grid (e.g., (11,11))
-        """
-        H, W = self.input_resolution
-        b1 = self.branch1_attn(x_tokens)
-        b1 = b1.permute(1, 0, 2)
-        return self._out_proj(b1, self.output_shape)
-
-
-# ==================================================================
-
 
 class BaseModel(nn.Module):
     def __init__(self, channel=32):
@@ -789,8 +696,7 @@ class BBSNetTransformerAttention(BaseModel):
         C = [64, 256, 512, 1024, 2048]           # channel dims from ResNet
 
         # you can also set per stage (smaller patch for early layers)
-        # 88x88, 88x88, 44x44, 22x22, 11x11
-        patch_size = [4, 4, 2, 2, 1]
+        patch_size = [8, 8, 4, 2, 1]
 
         # Replace FusionBlock2D with RGBDViTBlock
         self.fuse0 = RGBDViTBlock(
@@ -819,48 +725,6 @@ class BBSNetTransformerAttention(BaseModel):
             patch_size=patch_size[4], dropout=dropout, attn_dropout=dropout
         )
 
-        # For stage [1, 512, 44, 44]
-        self.rfb2_1 = TransformerGCM(
-            dim=128, input_resolution=(22, 22), window_size=11,
-            depth=1, out_channels=32, patch_size=patch_size[2], output_shape=(44, 44)
-        )
-
-        # For stage [1, 1024, 22, 22]
-        self.rfb3_1 = TransformerGCM(
-            dim=128, input_resolution=(11, 11), window_size=11,
-            depth=1, out_channels=32, patch_size=patch_size[3], output_shape=(22, 22)
-        )
-
-        # For stage [1, 2048, 11, 11]
-        self.rfb4_1 = TransformerGCM(
-            dim=128, input_resolution=(11, 11), window_size=11,
-            depth=1, out_channels=32, patch_size=patch_size[4], output_shape=(11, 11)
-        )
-
-        # For stage [1, 64, 88, 88]
-        # self.rfb0_2 = TransformerGCM(
-        #     dim=128,
-        #     heads=4,
-        #     out_channels=32,
-        #     patch_size=8   # 88 / 11 = 8
-        # )
-
-        # # For stage [1, 256, 88, 88]
-        # self.rfb1_2 = TransformerGCM(
-        #     dim=128,
-        #     heads=4,
-        #     out_channels=32,
-        #     patch_size=8
-        # )
-
-        # # For stage [1, 512, 44, 44]
-        # self.rfb5_2 = TransformerGCM(
-        #     dim=128,
-        #     heads=4,
-        #     out_channels=32,
-        #     patch_size=4
-        # )
-
         if self.training:
             self.initialize_weights()
 
@@ -869,70 +733,66 @@ class BBSNetTransformerAttention(BaseModel):
         x = self.resnet.conv1(x)
         x = self.resnet.bn1(x)
         x = self.resnet.relu(x)
-        x = self.resnet.maxpool(x)  # [1, 64, 88, 88]
+        x = self.resnet.maxpool(x)
 
         x_depth = self.resnet_depth.conv1(x_depth)
         x_depth = self.resnet_depth.bn1(x_depth)
         x_depth = self.resnet_depth.relu(x_depth)
-        x_depth = self.resnet_depth.maxpool(x_depth)  # [1, 64, 88, 88]
+        x_depth = self.resnet_depth.maxpool(x_depth)
 
         # ---- layer0 fusion (64ch) ----
-        x, fused_tokens0 = self.fuse0(x, x_depth)  # [1, 64, 88, 88]
+        x = self.fuse0(x, x_depth)
 
         # layer1
-        x1 = self.resnet.layer1(x)  # [1, 256, 88, 88]
-        x1_depth = self.resnet_depth.layer1(x_depth)  # [1, 256, 88, 88]
+        x1 = self.resnet.layer1(x)
+        x1_depth = self.resnet_depth.layer1(x_depth)
 
         # ---- layer1 fusion (256ch) ----
-        x1, fused_tokens1 = self.fuse1(x1, x1_depth)  # [1, 256, 88, 88]
+        x1 = self.fuse1(x1, x1_depth)
 
         # layer2
-        x2 = self.resnet.layer2(x1)  # [1, 512, 44, 44]
-        x2_depth = self.resnet_depth.layer2(x1_depth)  # [1, 512, 44, 44]
+        x2 = self.resnet.layer2(x1)
+        x2_depth = self.resnet_depth.layer2(x1_depth)
 
         # ---- layer2 fusion (512ch) ----
-        x2, fused_tokens2 = self.fuse2(x2, x2_depth)  # [1, 512, 44, 44]
+        x2 = self.fuse2(x2, x2_depth)
 
         # layer3_1
-        x3_1 = self.resnet.layer3_1(x2)  # [1, 1024, 22, 22]
-        x3_1_depth = self.resnet_depth.layer3_1(x2_depth)  # [1, 1024, 22, 22]
+        x3_1 = self.resnet.layer3_1(x2)
+        x3_1_depth = self.resnet_depth.layer3_1(x2_depth)
 
         # ---- layer3_1 fusion (1024ch) ----
-        x3_1, fused_tokens3 = self.fuse3_1(
-            x3_1, x3_1_depth)  # [1, 1024, 22, 22]
+        x3_1 = self.fuse3_1(x3_1, x3_1_depth)
 
         # layer4_1
-        x4_1 = self.resnet.layer4_1(x3_1)  # [1, 2048, 11, 11]
-        x4_1_depth = self.resnet_depth.layer4_1(
-            x3_1_depth)  # [1, 2048, 11, 11]
+        x4_1 = self.resnet.layer4_1(x3_1)
+        x4_1_depth = self.resnet_depth.layer4_1(x3_1_depth)
 
         # ---- layer4_1 fusion (2048ch) ----
-        x4_1, fused_tokens4 = self.fuse4_1(
-            x4_1, x4_1_depth)  # [1, 2048, 11, 11]
+        x4_1 = self.fuse4_1(x4_1, x4_1_depth)
 
         # produce initial saliency map by decoder1
-        x2_1 = self.rfb2_1(fused_tokens2)  # → [1, 32, 44, 44]
-        x3_1 = self.rfb3_1(fused_tokens3)  # → [1, 32, 22, 22]
-        x4_1 = self.rfb4_1(fused_tokens4)  # → [1, 32, 11, 11]
+        x2_1 = self.rfb2_1(x2)
+        x3_1 = self.rfb3_1(x3_1)
+        x4_1 = self.rfb4_1(x4_1)
 
-        attention_map = self.agg1(x4_1, x3_1, x2_1)  # [1, 1, 44, 44]
+        attention_map = self.agg1(x4_1, x3_1, x2_1)
 
         # Refine low-layer features by initial map
-        # [1, 64, 88, 88], [1, 256, 88, 88], [1, 512, 44, 44]
         x, x1, x5 = self.HA(attention_map.sigmoid(), x, x1, x2)
 
         # produce final saliency map by decoder2
-        x0_2 = self.rfb0_2(x)  # [1, 64, 88, 88] -> [1, 32, 88, 88]
-        x1_2 = self.rfb1_2(x1)  # [1, 256, 88, 88] -> [1, 32, 88, 88]
-        x5_2 = self.rfb5_2(x5)  # [1, 512, 44, 44] -> [1, 32, 44, 44]
+        x0_2 = self.rfb0_2(x)
+        x1_2 = self.rfb1_2(x1)
+        x5_2 = self.rfb5_2(x5)
 
-        y = self.agg2(x5_2, x1_2, x0_2)  # [1, 96, 88, 88]
+        y = self.agg2(x5_2, x1_2, x0_2)
 
         # PTM module
-        y = self.agant1(y)  # [1, 64, 88, 88]
-        y = self.deconv1(y)  # [1, 64, 176, 176]
-        y = self.agant2(y)  # [1, 32, 176, 176]
-        y = self.deconv2(y)  # [1, 32, 352, 352]
-        y = self.out2_conv(y)  # [1, 1, 352, 352]
+        y = self.agant1(y)
+        y = self.deconv1(y)
+        y = self.agant2(y)
+        y = self.deconv2(y)
+        y = self.out2_conv(y)
 
         return self.upsample(attention_map), y
