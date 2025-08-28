@@ -1,8 +1,8 @@
+import torch.nn.functional as F
 from torchvision.models import resnet50, ResNet50_Weights
 import torch
 import torch.nn as nn
 from models.ResNet import ResNet50
-from torch.nn import functional as F
 from typing import Tuple
 from models.swin_transformer import BasicLayer
 
@@ -461,30 +461,6 @@ class RGBDViTBlock(nn.Module):
 
 # ==================================================================
 
-class MLP(nn.Module):
-    def __init__(self, dim, hidden_mult=4, drop=0.0):
-        super().__init__()
-        hidden = int(dim * hidden_mult)
-        self.fc1 = nn.Linear(dim, hidden)
-        self.act = nn.GELU()
-        self.fc2 = nn.Linear(hidden, dim)
-        self.drop = nn.Dropout(drop)
-
-    def forward(self, x):
-        x = self.fc1(x)
-        x = self.act(x)
-        x = self.drop(x)
-        x = self.fc2(x)
-        x = self.drop(x)
-        return x
-
-
-def _check_grid(N: int, grid_size: Tuple[int, int]):
-    H, W = grid_size
-    if H * W != N:
-        raise ValueError(f"N={N} tokens doesn't match grid HxW={H}x{W}={H*W}")
-
-
 class TransformerGCM(nn.Module):
     """
     Transformer-based reimplementation of GCM with multi-branch token mixers,
@@ -517,14 +493,6 @@ class TransformerGCM(nn.Module):
         attn_drop: float = 0.0,
         proj_drop: float = 0.0,
     ):
-        # input: [1, 121, 128]
-        # ouput: [1, 32, 44, 44]
-        #   dim: 128
-        #   input_resolution: sqrt(121)
-        #   window_size: Swin partition size
-        #   depth: number of Swin block
-        #   out_channels: 32
-        #   patch_size: same as fusion block
         super().__init__()
         self.dim = dim
         self.heads = heads
@@ -546,6 +514,7 @@ class TransformerGCM(nn.Module):
     def forward(
         self,
         x_tokens: torch.Tensor,
+        fmap=False
     ):
         """
         x_tokens: [B, N, D]
@@ -553,8 +522,162 @@ class TransformerGCM(nn.Module):
         """
         H, W = self.input_resolution
         b1 = self.branch1_attn(x_tokens)
-        b1 = b1.permute(1, 0, 2)
-        return self._out_proj(b1, self.output_shape)
+        if fmap:
+            b1 = b1.permute(1, 0, 2)
+            return self._out_proj(b1, self.output_shape)
+        return b1
+
+
+class RefineSwin(nn.Module):
+    def __init__(self):
+        super(RefineSwin, self).__init__()
+        self.mode = 'bilinear'
+        self.align_corners = True
+
+    def forward(self, attention, x1, x2, x3):
+        # interpolate to match spatial sizes (broadcast will handle channels)
+        att1 = F.interpolate(
+            attention, size=x1.shape[2:], mode=self.mode, align_corners=self.align_corners)
+        att2 = F.interpolate(
+            attention, size=x2.shape[2:], mode=self.mode, align_corners=self.align_corners)
+        att3 = F.interpolate(
+            attention, size=x3.shape[2:], mode=self.mode, align_corners=self.align_corners)
+
+        # refinement: f' = f + f * S  (attention S is single-channel, broadcast across C)
+        x1 = x1 + x1 * att1
+        x2 = x2 + x2 * att2
+        x3 = x3 + x3 * att3
+
+        return x1, x2, x3
+
+
+class aggregation_final_swin(nn.Module):
+
+    def __init__(self, channel):
+        super(aggregation_final_swin, self).__init__()
+        self.relu = nn.ReLU(True)
+
+        self.mode = 'bilinear'
+        self.align_corners = True
+
+        self.conv_upsample1 = BasicConv2d(channel, channel, 3, padding=1)
+        self.conv_upsample2 = BasicConv2d(channel, channel, 3, padding=1)
+        self.conv_upsample3 = BasicConv2d(channel, channel, 3, padding=1)
+        self.conv_upsample4 = BasicConv2d(channel, channel, 3, padding=1)
+        self.conv_upsample5 = BasicConv2d(2*channel, 2*channel, 3, padding=1)
+
+        self.conv_concat2 = BasicConv2d(2*channel, 2*channel, 3, padding=1)
+        self.conv_concat3 = BasicConv2d(3*channel, 3*channel, 3, padding=1)
+
+    def forward(self, x1, x2, x3):
+        # x1: [1, 32, 24, 24]
+        # x2: [1, 32, 48, 48]
+        # x3: [1, 32, 96, 96]
+
+        x1u = F.interpolate(
+            x1, size=x3.shape[2:], mode=self.mode, align_corners=self.align_corners)
+        x2u = F.interpolate(
+            x2, size=x3.shape[2:], mode=self.mode, align_corners=self.align_corners)
+        x2_1 = self.conv_upsample1(x1u) * x2u
+
+        x3_1 = self.conv_upsample2(x1u) \
+            * self.conv_upsample3(x2u) * x3
+
+        x2_2 = torch.cat((x2_1, self.conv_upsample4(x1u)), 1)
+        x2_2 = self.conv_concat2(x2_2)
+
+        x3_2 = torch.cat((x3_1, self.conv_upsample5(x2_2)), 1)
+        x3_2 = self.conv_concat3(x3_2)
+
+        return x3_2
+
+
+class MultiScaleAttentionRefiner(nn.Module):
+    def __init__(self, dims_in, dims_refine, out_dim=128, H=24, W=24):
+        """
+        Args:
+            dims_in: list of channel dimensions of [fusion2, fusion3, fusion4] (e.g. [128, 128, 128])
+            dims_refine: list of channel dimensions of [fusion0, fusion1, fusion2] (e.g. [32, 64, 128])
+            out_dim: hidden embedding size for attention fusion
+            H, W: spatial size of the highest resolution (e.g. 24x24 → 576 tokens)
+        """
+        super().__init__()
+        self.H, self.W = H, W
+
+        # Projection layers for input tokens
+        self.proj_in = nn.ModuleList([
+            nn.Linear(d, out_dim) for d in dims_in
+        ])
+
+        # Projection layers for refinement tokens
+        self.proj_refine = nn.ModuleList([
+            nn.Linear(d, out_dim) for d in dims_refine
+        ])
+
+        # Attention fusion
+        self.attn = nn.MultiheadAttention(
+            embed_dim=out_dim, num_heads=4, batch_first=True)
+
+        # Output projections for refined tokens
+        self.proj_out = nn.ModuleList([
+            nn.Linear(out_dim, d) for d in dims_refine
+        ])
+
+    def forward(self, fusion0, fusion1, fusion2, fusion3, fusion4):
+        """
+        fusion0: [N, 576, 32]  → corresponds to [32,24,24]
+        fusion1: [N, 576, 64]
+        fusion2: [N, 144, 128] → corresponds to [128,12,12]
+        fusion3: [N, 144, 128] → corresponds to [128,6,6]
+        fusion4: [N, 576, 128] → corresponds to [128,3,3] but reshaped to tokens
+        """
+
+        B = fusion0.size(0)
+
+        # --- Step 1: Project and Upsample fusion2, fusion3, fusion4 to [N, 576, out_dim] ---
+        inputs = []
+        for i, (f, proj) in enumerate(zip([fusion2, fusion3, fusion4], self.proj_in)):
+            x = proj(f)  # [N, L, out_dim]
+            L = x.size(1)
+            spatial_size = int(L ** 0.5)  # assume square
+            x = x.transpose(1, 2).reshape(B, -1, spatial_size, spatial_size)
+            x = F.interpolate(x, size=(self.H, self.W),
+                              mode="bilinear", align_corners=False)
+            x = x.flatten(2).transpose(1, 2)  # [N, 576, out_dim]
+            inputs.append(x)
+
+        fused = torch.stack(inputs, dim=0).mean(
+            0)  # average fusion → [N, 576, out_dim]
+
+        # --- Step 2: Self-attention to get attention map ---
+        # [N, 576, out_dim], [N, 576, 576]
+        attn_out, attn_weights = self.attn(fused, fused, fused)
+
+        # reshape attention map to [N, H, W]
+        attn_map = attn_weights.mean(1).reshape(
+            B, self.H, self.W)  # average across queries
+
+        # --- Step 3: Refine fusion0, fusion1, fusion2 ---
+        refined = []
+        for f, proj_in, proj_out in zip([fusion0, fusion1, fusion2], self.proj_refine, self.proj_out):
+            # [N, 576, out_dim] (note: fusion2 will be upsampled too)
+            x = proj_in(f)
+            if x.size(1) != self.H * self.W:
+                # Upsample to 24x24
+                L = x.size(1)
+                spatial_size = int(L ** 0.5)
+                x = x.transpose(1, 2).reshape(
+                    B, -1, spatial_size, spatial_size)
+                x = F.interpolate(x, size=(self.H, self.W),
+                                  mode="bilinear", align_corners=False)
+                x = x.flatten(2).transpose(1, 2)
+
+            # apply attention (elementwise modulation)
+            attn_factor = attn_map.flatten(1).unsqueeze(-1)  # [N, 576, 1]
+            x = x * attn_factor
+            refined.append(proj_out(x))  # project back to original dim
+
+        return refined, attn_map.unsqueeze(1)
 
 
 # ==================================================================
@@ -785,81 +908,86 @@ class BBSNetTransformerAttention(BaseModel):
         dropout = 0.1
 
         heads_stage = (4, 4, 8, 8, 8)
-        embed_stage = (32, 64, 128, 128, 128)  # embed_dim for each stage
+        embed_dim = (32, 64, 128, 128, 128)  # embed_dim for each stage
         C = [64, 256, 512, 1024, 2048]           # channel dims from ResNet
+        S = [96, 96, 48, 24, 12]
 
         # you can also set per stage (smaller patch for early layers)
-        # 88x88, 88x88, 44x44, 22x22, 11x11
-        patch_size = [4, 4, 2, 2, 1]
+        P = [4, 4, 2, 2, 1]
 
         # Replace FusionBlock2D with RGBDViTBlock
         self.fuse0 = RGBDViTBlock(
             in_ch_r=C[0], in_ch_t=C[0],
-            embed_dim=embed_stage[0], num_heads=heads_stage[0],
-            patch_size=patch_size[0], dropout=dropout, attn_dropout=dropout
+            embed_dim=embed_dim[0], num_heads=heads_stage[0],
+            patch_size=P[0], dropout=dropout, attn_dropout=dropout
         )
         self.fuse1 = RGBDViTBlock(
             in_ch_r=C[1], in_ch_t=C[1],
-            embed_dim=embed_stage[1], num_heads=heads_stage[1],
-            patch_size=patch_size[1], dropout=dropout, attn_dropout=dropout
+            embed_dim=embed_dim[1], num_heads=heads_stage[1],
+            patch_size=P[1], dropout=dropout, attn_dropout=dropout
         )
         self.fuse2 = RGBDViTBlock(
             in_ch_r=C[2], in_ch_t=C[2],
-            embed_dim=embed_stage[2], num_heads=heads_stage[2],
-            patch_size=patch_size[2], dropout=dropout, attn_dropout=dropout
+            embed_dim=embed_dim[2], num_heads=heads_stage[2],
+            patch_size=P[2], dropout=dropout, attn_dropout=dropout
         )
         self.fuse3_1 = RGBDViTBlock(
             in_ch_r=C[3], in_ch_t=C[3],
-            embed_dim=embed_stage[3], num_heads=heads_stage[3],
-            patch_size=patch_size[3], dropout=dropout, attn_dropout=dropout
+            embed_dim=embed_dim[3], num_heads=heads_stage[3],
+            patch_size=P[3], dropout=dropout, attn_dropout=dropout
         )
         self.fuse4_1 = RGBDViTBlock(
             in_ch_r=C[4], in_ch_t=C[4],
-            embed_dim=embed_stage[4], num_heads=heads_stage[4],
-            patch_size=patch_size[4], dropout=dropout, attn_dropout=dropout
+            embed_dim=embed_dim[4], num_heads=heads_stage[4],
+            patch_size=P[4], dropout=dropout, attn_dropout=dropout
         )
 
-        # For stage [1, 512, 44, 44]
+        W = [8, 8, 8, 4, 4]
         self.rfb2_1 = TransformerGCM(
-            dim=128, input_resolution=(22, 22), window_size=11,
-            depth=1, out_channels=32, patch_size=patch_size[2], output_shape=(44, 44)
+            dim=embed_dim[2], input_resolution=(S[2]//P[2], S[2]//P[2]), window_size=W[2],
+            depth=2, out_channels=32, patch_size=P[2], output_shape=(S[2], S[2])
         )
 
-        # For stage [1, 1024, 22, 22]
         self.rfb3_1 = TransformerGCM(
-            dim=128, input_resolution=(11, 11), window_size=11,
-            depth=1, out_channels=32, patch_size=patch_size[3], output_shape=(22, 22)
+            dim=embed_dim[3], input_resolution=(S[3]//P[3], S[3]//P[3]), window_size=W[3],
+            depth=2, out_channels=32, patch_size=P[3], output_shape=(S[3], S[3])
         )
 
-        # For stage [1, 2048, 11, 11]
         self.rfb4_1 = TransformerGCM(
-            dim=128, input_resolution=(11, 11), window_size=11,
-            depth=1, out_channels=32, patch_size=patch_size[4], output_shape=(11, 11)
+            dim=embed_dim[4], input_resolution=(S[4]//P[4], S[4]//P[4]), window_size=W[4],
+            depth=2, out_channels=32, patch_size=P[4], output_shape=(S[4], S[4])
         )
 
-        # For stage [1, 64, 88, 88]
-        # self.rfb0_2 = TransformerGCM(
-        #     dim=128,
-        #     heads=4,
-        #     out_channels=32,
-        #     patch_size=8   # 88 / 11 = 8
-        # )
+        self.rfb0_2 = TransformerGCM(
+            dim=embed_dim[0], input_resolution=(S[0]//P[0], S[0]//P[0]), window_size=W[0],
+            depth=2, out_channels=32, patch_size=P[2], output_shape=(S[0], S[0])
+        )
 
-        # # For stage [1, 256, 88, 88]
-        # self.rfb1_2 = TransformerGCM(
-        #     dim=128,
-        #     heads=4,
-        #     out_channels=32,
-        #     patch_size=8
-        # )
+        self.rfb1_2 = TransformerGCM(
+            dim=embed_dim[1], input_resolution=(S[1]//P[1], S[1]//P[1]), window_size=W[1],
+            depth=2, out_channels=32, patch_size=P[1], output_shape=(S[1], S[1])
+        )
 
-        # # For stage [1, 512, 44, 44]
-        # self.rfb5_2 = TransformerGCM(
-        #     dim=128,
-        #     heads=4,
-        #     out_channels=32,
-        #     patch_size=4
-        # )
+        self.rfb5_2 = TransformerGCM(
+            dim=embed_dim[2], input_resolution=(S[2]//P[2], S[2]//P[2]), window_size=W[2],
+            depth=2, out_channels=32, patch_size=P[2], output_shape=(S[2], S[2])
+        )
+
+        self.refiner = MultiScaleAttentionRefiner(
+            dims_in=[128, 128, 128],   # fusion2, fusion3, fusion4
+            dims_refine=[32, 64, 128],  # fusion0, fusion1, fusion2
+            out_dim=128,
+            H=24, W=24
+        )
+
+        # input shape: [64, 96, 96] = [C1, H, W]
+        # fusion0: [H/P0 * H/P0, E0] = [576, 32]
+        # fusion1: [H/P1 * H/P1, E1] = [576, 64]
+        # fusion2: [(H/2)/P2 * (H/2)/P2, E2] = [576, 128]
+        # fusion3: [(H/4)/P3 * (H/4)/P3, E3] = [144, 128]
+        # fusion4: [(H/8)/P4 * (H/8)/P4, E4] = [144, 128]
+
+        self.agg2 = aggregation_final_swin(32)
 
         if self.training:
             self.initialize_weights()
@@ -869,62 +997,63 @@ class BBSNetTransformerAttention(BaseModel):
         x = self.resnet.conv1(x)
         x = self.resnet.bn1(x)
         x = self.resnet.relu(x)
-        x = self.resnet.maxpool(x)  # [1, 64, 88, 88]
+        x = self.resnet.maxpool(x)  # [2, 64, 96, 96]
 
         x_depth = self.resnet_depth.conv1(x_depth)
         x_depth = self.resnet_depth.bn1(x_depth)
         x_depth = self.resnet_depth.relu(x_depth)
-        x_depth = self.resnet_depth.maxpool(x_depth)  # [1, 64, 88, 88]
+        x_depth = self.resnet_depth.maxpool(x_depth)  # [2, 64, 96, 96]
 
         # ---- layer0 fusion (64ch) ----
-        x, fused_tokens0 = self.fuse0(x, x_depth)  # [1, 64, 88, 88]
+        # [2, 64, 96, 96], [2, 576, 32]
+        x, fused_tokens0 = self.fuse0(x, x_depth)
 
         # layer1
-        x1 = self.resnet.layer1(x)  # [1, 256, 88, 88]
-        x1_depth = self.resnet_depth.layer1(x_depth)  # [1, 256, 88, 88]
+        x1 = self.resnet.layer1(x)  # [2, 256, 96, 96]
+        x1_depth = self.resnet_depth.layer1(x_depth)  # [2, 256, 96, 96]
 
         # ---- layer1 fusion (256ch) ----
-        x1, fused_tokens1 = self.fuse1(x1, x1_depth)  # [1, 256, 88, 88]
+        # [2, 256, 96, 96], [2, 576, 64]
+        x1, fused_tokens1 = self.fuse1(x1, x1_depth)
 
         # layer2
-        x2 = self.resnet.layer2(x1)  # [1, 512, 44, 44]
-        x2_depth = self.resnet_depth.layer2(x1_depth)  # [1, 512, 44, 44]
+        x2 = self.resnet.layer2(x1)  # [2, 512, 48, 48]
+        x2_depth = self.resnet_depth.layer2(x1_depth)  # [2, 512, 48, 48]
 
         # ---- layer2 fusion (512ch) ----
-        x2, fused_tokens2 = self.fuse2(x2, x2_depth)  # [1, 512, 44, 44]
+        # [2, 512, 48, 48], [2, 576, 128]
+        x2, fused_tokens2 = self.fuse2(x2, x2_depth)
 
         # layer3_1
-        x3_1 = self.resnet.layer3_1(x2)  # [1, 1024, 22, 22]
-        x3_1_depth = self.resnet_depth.layer3_1(x2_depth)  # [1, 1024, 22, 22]
+        x3_1 = self.resnet.layer3_1(x2)  # [2, 1024, 24, 24]
+        x3_1_depth = self.resnet_depth.layer3_1(x2_depth)  # [2, 1024, 24, 24]
 
         # ---- layer3_1 fusion (1024ch) ----
         x3_1, fused_tokens3 = self.fuse3_1(
-            x3_1, x3_1_depth)  # [1, 1024, 22, 22]
+            x3_1, x3_1_depth)  # [2, 1024, 24, 24], [2, 144, 128]
 
         # layer4_1
-        x4_1 = self.resnet.layer4_1(x3_1)  # [1, 2048, 11, 11]
+        x4_1 = self.resnet.layer4_1(x3_1)  # [2, 2048, 12, 12]
         x4_1_depth = self.resnet_depth.layer4_1(
-            x3_1_depth)  # [1, 2048, 11, 11]
+            x3_1_depth)  # [2, 2048, 12, 12]
 
         # ---- layer4_1 fusion (2048ch) ----
         x4_1, fused_tokens4 = self.fuse4_1(
-            x4_1, x4_1_depth)  # [1, 2048, 11, 11]
+            x4_1, x4_1_depth)  # [2, 2048, 12, 12], [2, 144, 128]
 
         # produce initial saliency map by decoder1
-        x2_1 = self.rfb2_1(fused_tokens2)  # → [1, 32, 44, 44]
-        x3_1 = self.rfb3_1(fused_tokens3)  # → [1, 32, 22, 22]
-        x4_1 = self.rfb4_1(fused_tokens4)  # → [1, 32, 11, 11]
+        x2_1 = self.rfb2_1(fused_tokens2)  # → [1, 32, 48, 48]
+        x3_1 = self.rfb3_1(fused_tokens3)  # → [1, 32, 48, 48]
+        x4_1 = self.rfb4_1(fused_tokens4)  # → [1, 32, 12, 12]
 
-        attention_map = self.agg1(x4_1, x3_1, x2_1)  # [1, 1, 44, 44]
-
-        # Refine low-layer features by initial map
-        # [1, 64, 88, 88], [1, 256, 88, 88], [1, 512, 44, 44]
-        x, x1, x5 = self.HA(attention_map.sigmoid(), x, x1, x2)
+        (x, x1, x5), attention_map = self.refiner(
+            fused_tokens0, fused_tokens1, x2_1, x3_1, x4_1
+        )
 
         # produce final saliency map by decoder2
-        x0_2 = self.rfb0_2(x)  # [1, 64, 88, 88] -> [1, 32, 88, 88]
-        x1_2 = self.rfb1_2(x1)  # [1, 256, 88, 88] -> [1, 32, 88, 88]
-        x5_2 = self.rfb5_2(x5)  # [1, 512, 44, 44] -> [1, 32, 44, 44]
+        x0_2 = self.rfb0_2(x, fmap=True)  # [2, 32, 96, 96]
+        x1_2 = self.rfb1_2(x1, fmap=True)  # [2, 32, 96, 96]
+        x5_2 = self.rfb5_2(x5, fmap=True)  # [2, 32, 48, 48]
 
         y = self.agg2(x5_2, x1_2, x0_2)  # [1, 96, 88, 88]
 
@@ -935,4 +1064,6 @@ class BBSNetTransformerAttention(BaseModel):
         y = self.deconv2(y)  # [1, 32, 352, 352]
         y = self.out2_conv(y)  # [1, 1, 352, 352]
 
-        return self.upsample(attention_map), y
+        s1 = F.interpolate(
+            attention_map, size=y.shape[2:], mode='bilinear', align_corners=True)
+        return s1, y
