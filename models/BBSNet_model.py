@@ -696,7 +696,91 @@ class MultiLevelSaliencyHead(nn.Module):
         return out
 
 
+class EfficientSaliencyHead(nn.Module):
+    """Simpler but more efficient alternative focusing on key improvements"""
+
+    def __init__(
+        self,
+        in_dims: List[int],
+        embed_dim: int = 128,
+        final_size: int = 384,
+    ):
+        super().__init__()
+        self.embed_dim = embed_dim
+        self.final_size = final_size
+
+        # Simple but effective projections
+        self.projections = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(dim, embed_dim),
+                nn.GELU(),
+                nn.Dropout(0.1)
+            ) for dim in in_dims
+        ])
+
+        # Adaptive fusion weights
+        self.fusion_weights = nn.Parameter(torch.ones(len(in_dims)))
+
+        # Context aggregation
+        self.context_conv = nn.Sequential(
+            nn.Conv2d(embed_dim, embed_dim, 3, 1, 1, groups=embed_dim//4),
+            nn.BatchNorm2d(embed_dim),
+            nn.GELU(),
+            nn.Conv2d(embed_dim, embed_dim, 1),
+            nn.BatchNorm2d(embed_dim),
+            nn.GELU()
+        )
+
+        # Simple but effective decoder
+        self.decoder = nn.Sequential(
+            nn.ConvTranspose2d(embed_dim, embed_dim//2, 4, 2, 1),
+            nn.BatchNorm2d(embed_dim//2),
+            nn.GELU(),
+            nn.ConvTranspose2d(embed_dim//2, embed_dim//4, 4, 2, 1),
+            nn.BatchNorm2d(embed_dim//4),
+            nn.GELU(),
+            nn.ConvTranspose2d(embed_dim//4, embed_dim//8, 4, 2, 1),
+            nn.BatchNorm2d(embed_dim//8),
+            nn.GELU(),
+            nn.Conv2d(embed_dim//8, 1, 3, 1, 1)
+        )
+
+    def _tokens_to_map(self, x: torch.Tensor, target_size: int = 24):
+        B, N, C = x.shape
+        H = int(math.sqrt(N))
+        spatial = x.transpose(1, 2).view(B, C, H, H)
+        if H != target_size:
+            spatial = F.interpolate(spatial, size=(target_size, target_size),
+                                    mode='bilinear', align_corners=False)
+        return spatial
+
+    def forward(self, feats: List[torch.Tensor]) -> torch.Tensor:
+        # Project and convert to spatial
+        spatial_feats = []
+        for i, feat in enumerate(feats):
+            proj_feat = self.projections[i](feat)  # (B, N, embed_dim)
+            spatial = self._tokens_to_map(proj_feat)  # (B, embed_dim, 24, 24)
+            spatial_feats.append(spatial)
+
+        # Weighted fusion
+        weights = torch.softmax(self.fusion_weights, dim=0)
+        fused = sum(w * feat for w, feat in zip(weights, spatial_feats))
+
+        # Context enhancement
+        enhanced = self.context_conv(fused)
+
+        # Decode to final size
+        out = self.decoder(enhanced)  # (B, 1, 192, 192)
+
+        # Final resize if needed
+        if out.shape[-1] != self.final_size:
+            out = F.interpolate(out, size=(self.final_size, self.final_size),
+                                mode='bilinear', align_corners=False)
+
+        return out
+
 # ==================================================================
+
 
 class TransformerGCM(nn.Module):
     """
@@ -1210,8 +1294,10 @@ class BBSNetTransformerAttention(BaseModel):
             patch_size=P[4], dropout=dropout, attn_dropout=dropout
         )
 
-        self.net = MultiLevelSaliencyHead(
-            in_dims=[32, 64, 128, 128, 128], embed_dim=128, base_grid=24)
+        in_dims = [32, 64, 128, 128, 128]
+        # self.net = MultiLevelSaliencyHead(
+        #     in_dims=[32, 64, 128, 128, 128], embed_dim=128, base_grid=24)
+        self.net = EfficientSaliencyHead(in_dims=in_dims, final_size=384)
 
         # input shape: [64, 96, 96] = [C1, H, W]
         # fusion0: [H/P0 * H/P0, E0] = [576, 32]
