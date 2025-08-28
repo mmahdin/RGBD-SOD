@@ -1,3 +1,5 @@
+from typing import List, Optional
+import math
 from typing import Tuple
 import torch.nn.functional as F
 from torchvision.models import resnet50, ResNet50_Weights
@@ -457,6 +459,215 @@ class RGBDViTBlock(nn.Module):
         f = self._out_proj(m, (H, W)) + Ri
 
         return f, torch.permute(m + rgb_tokens, (1, 0, 2))
+
+
+class PositionalEncoding2D(nn.Module):
+    """Sin-cos 2D positional encoding.
+    Returns (1, C, H, W). C must be even.
+    """
+
+    def __init__(self, channels: int):
+        super().__init__()
+        assert channels % 2 == 0, "channels must be even"
+        self.channels = channels
+
+    def forward(self, h: int, w: int, device=None):
+        if device is None:
+            device = torch.device("cpu")
+
+        c = self.channels
+        # half for Y, half for X
+        c_half = c // 2
+
+        y_pos = torch.arange(h, dtype=torch.float32,
+                             device=device).unsqueeze(1)  # (H,1)
+        x_pos = torch.arange(w, dtype=torch.float32,
+                             device=device).unsqueeze(1)  # (W,1)
+
+        div_term = torch.exp(
+            torch.arange(0, c_half, 2, dtype=torch.float32, device=device)
+            * -(math.log(10000.0) / c_half)
+        )  # shape (c_half//2,)
+
+        # Y encoding (H, c_half)
+        pe_y = torch.zeros(h, c_half, device=device)
+        pe_y[:, 0::2] = torch.sin(y_pos * div_term)
+        pe_y[:, 1::2] = torch.cos(y_pos * div_term)
+
+        # X encoding (W, c_half)
+        pe_x = torch.zeros(w, c_half, device=device)
+        pe_x[:, 0::2] = torch.sin(x_pos * div_term)
+        pe_x[:, 1::2] = torch.cos(x_pos * div_term)
+
+        # combine (H, W, C)
+        pe_y = pe_y.unsqueeze(1).expand(-1, w, -1)  # (H,W,c_half)
+        pe_x = pe_x.unsqueeze(0).expand(h, -1, -1)  # (H,W,c_half)
+        pe = torch.cat([pe_y, pe_x], dim=-1)        # (H,W,C)
+
+        pe = pe.permute(2, 0, 1).unsqueeze(0)       # (1,C,H,W)
+        return pe
+
+
+class LearnablePositionalEncoding2D(nn.Module):
+    """Learnable 2D positional encoding: (1, C, H, W)."""
+
+    def __init__(self, channels: int, height: int, width: int):
+        super().__init__()
+        self.pos_emb = nn.Parameter(torch.zeros(1, channels, height, width))
+        nn.init.trunc_normal_(self.pos_emb, std=0.02)  # good init
+
+    def forward(self, h: int, w: int, device=None):
+        # if input h, w == base_grid, we just return it
+        # otherwise interpolate to match
+        if (h, w) != (self.pos_emb.shape[2], self.pos_emb.shape[3]):
+            pe = F.interpolate(self.pos_emb, size=(
+                h, w), mode="bilinear", align_corners=False)
+        else:
+            pe = self.pos_emb
+        return pe
+
+
+class MultiLevelSaliencyHead(nn.Module):
+    """Fuse multi-level token features into a final saliency map.
+
+    Strategy summary:
+    - Each input is (B, N_i, C_i) where N_i is a perfect square.
+    - Project each level to a shared embedding dim.
+    - Reshape tokens -> spatial map H_i x W_i (H_i = W_i = sqrt(N_i)).
+    - Upsample smaller maps to a base grid (default base_grid=24 to match 576 tokens).
+    - Add 2D positional encodings.
+    - Concatenate along channel and reduce with conv to `embed_dim`.
+    - Run a lightweight Transformer encoder across the base_grid tokens.
+    - Reshape to (B, embed_dim, base_grid, base_grid), upsample to final image size (384x384)
+      and decode with conv head to produce a single-channel saliency map.
+
+    This keeps transformer cost reasonable (e.g. 576 tokens) while still gathering multi-scale
+    context from multiple levels.
+    """
+
+    def __init__(
+        self,
+        in_dims: List[int],
+        embed_dim: int = 128,
+        base_grid: int = 24,
+        transformer_layers: int = 2,
+        transformer_heads: int = 8,
+        dropout: float = 0.1,
+        final_size: int = 384,
+    ):
+        """Create the saliency head.
+
+        Args:
+            in_dims: list of input channel dims for each fusion level.
+            embed_dim: shared embedding dimension used inside the module.
+            base_grid: spatial grid size to which we upsample smaller levels (default 24)
+            transformer_layers: number of transformer encoder layers.
+            transformer_heads: number of attention heads. embed_dim must be divisible by this.
+            final_size: final saliency map side length (e.g. 384)
+        """
+        super().__init__()
+        assert embed_dim % transformer_heads == 0, "embed_dim must be divisible by num_heads"
+
+        self.in_dims = in_dims
+        self.embed_dim = embed_dim
+        self.base_grid = base_grid
+        self.final_size = final_size
+
+        # Per-level linear projection: project token dim -> embed_dim
+        self.proj_layers = nn.ModuleList(
+            [nn.Linear(d, embed_dim) for d in in_dims])
+
+        # Positional encoding (learned or sin-cos). We'll use sin-cos implemented above.
+        self.pos_enc = PositionalEncoding2D(embed_dim)
+
+        # After upsampling all to base_grid, we will concatenate along channel and reduce
+        # with a conv to embed_dim to prepare tokens for transformer.
+        concat_channels = embed_dim * len(in_dims)
+        self.fuse_reduce = nn.Sequential(
+            nn.Conv2d(concat_channels, embed_dim, kernel_size=1, bias=False),
+            nn.BatchNorm2d(embed_dim),
+            nn.GELU(),
+        )
+
+        # Lightweight transformer encoder across base_grid*base_grid tokens
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=embed_dim, nhead=transformer_heads, dim_feedforward=embed_dim * 4, dropout=dropout, activation="gelu"
+        )
+        self.transformer = nn.TransformerEncoder(
+            encoder_layer, num_layers=transformer_layers)
+
+        # Decoder: upsample to final_size and map to single channel saliency.
+        # We'll use two conv blocks and a final output conv.
+        self.decoder = nn.Sequential(
+            nn.Conv2d(embed_dim, embed_dim, kernel_size=3,
+                      padding=1, bias=False),
+            nn.BatchNorm2d(embed_dim),
+            nn.GELU(),
+            nn.Conv2d(embed_dim, embed_dim // 2,
+                      kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(embed_dim // 2),
+            nn.GELU(),
+            nn.Conv2d(embed_dim // 2, 1, kernel_size=1),
+        )
+
+    def _tokens_to_map(self, x: torch.Tensor):
+        # x: (B, N, C) -> (B, C, H, W)
+        B, N, C = x.shape
+        H = int(math.sqrt(N))
+        assert H * H == N, f"token count must be a perfect square, got {N}"
+        x = x.transpose(1, 2).contiguous()  # (B, C, N)
+        x = x.view(B, C, H, H)
+        return x
+
+    def forward(self, feats: List[torch.Tensor]):
+        """Forward.
+
+        Args:
+            feats: list of tensors [B, N_i, C_i]
+        Returns:
+            saliency logits in shape (B, 1, final_size, final_size) (not sigmoid-ed)
+        """
+        B = feats[0].shape[0]
+        device = feats[0].device
+
+        maps = []
+        for i, x in enumerate(feats):
+            # x: (B, N, C_i)
+            # project tokens
+            proj = self.proj_layers[i](x)  # (B, N, embed_dim)
+            spatial = self._tokens_to_map(proj)  # (B, embed_dim, H_i, H_i)
+
+            H_i = spatial.shape[-1]
+            if H_i != self.base_grid:
+                spatial = F.interpolate(spatial, size=(
+                    self.base_grid, self.base_grid), mode="bilinear", align_corners=False)
+
+            # add pos encoding
+            pe = self.pos_enc(self.base_grid, self.base_grid, device=device)
+            spatial = spatial + pe
+            maps.append(spatial)
+
+        # concat along channel and reduce
+        x = torch.cat(maps, dim=1)  # (B, embed_dim * L, base_grid, base_grid)
+        x = self.fuse_reduce(x)  # (B, embed_dim, base_grid, base_grid)
+
+        # Prepare for transformer: flatten spatial tokens -> (T, B, C) as required by PyTorch transformer
+        B, C, H, W = x.shape
+        T = H * W
+        tokens = x.view(B, C, T).permute(2, 0, 1).contiguous()  # (T, B, C)
+
+        # Transformer expects (S, N, E) where S=sequence length, N=batch
+        tokens = self.transformer(tokens)  # (T, B, C)
+
+        # Back to spatial
+        tokens = tokens.permute(1, 2, 0).contiguous().view(B, C, H, W)
+
+        # Upsample to final_size
+        up = F.interpolate(tokens, size=(
+            self.final_size, self.final_size), mode="bilinear", align_corners=False)
+
+        out = self.decoder(up)  # (B,1,final_size,final_size)
+        return out
 
 
 # ==================================================================
@@ -990,6 +1201,9 @@ class BBSNetTransformerAttention(BaseModel):
             depth=1, out_channels=32, patch_size=P[4], output_shape=(S[4], S[4])
         )
 
+        self.net = MultiLevelSaliencyHead(
+            in_dims=[32, 64, 128, 128, 128], embed_dim=128, base_grid=24)
+
         # self.rfb0_2 = TransformerGCM(
         #     dim=embed_dim[0], input_resolution=(S[0]//P[0], S[0]//P[0]), window_size=W[0],
         #     depth=2, out_channels=32, patch_size=P[0], output_shape=(S[0], S[0])
@@ -1083,39 +1297,41 @@ class BBSNetTransformerAttention(BaseModel):
             x4_1, x4_1_depth)  # [2, 2048, 12, 12], [2, 144, 128]
 
         # ====================================================================
+        y = self.net([fused_tokens0, fused_tokens1,
+                     fused_tokens2, fused_tokens3, fused_tokens4])
 
-        # produce initial saliency map by decoder1
-        fused_tokens2, x2_1 = self.rfb2_1(fused_tokens2)  # → [1, 32, 48, 48]
-        fused_tokens3, x3_1 = self.rfb3_1(fused_tokens3)  # → [1, 32, 48, 48]
-        fused_tokens4, x4_1 = self.rfb4_1(fused_tokens4)  # → [1, 32, 12, 12]
+        # # produce initial saliency map by decoder1
+        # fused_tokens2, x2_1 = self.rfb2_1(fused_tokens2)  # → [1, 32, 48, 48]
+        # fused_tokens3, x3_1 = self.rfb3_1(fused_tokens3)  # → [1, 32, 48, 48]
+        # fused_tokens4, x4_1 = self.rfb4_1(fused_tokens4)  # → [1, 32, 12, 12]
 
-        attention_map = self.agg1(x4_1, x3_1, x2_1)
+        # attention_map = self.agg1(x4_1, x3_1, x2_1)
 
-        # Refine low-layer features by initial map
-        x, x1, x5 = self.HA(attention_map.sigmoid(), x, x1, x2)
+        # # Refine low-layer features by initial map
+        # x, x1, x5 = self.HA(attention_map.sigmoid(), x, x1, x2)
 
-        # x, x1, x5 = self.refiner(
-        #     student_feats=(fused_tokens0, fused_tokens1, fused_tokens2),
-        #     teacher_feats=(fused_tokens2, fused_tokens3, fused_tokens4)
-        # )
+        # # x, x1, x5 = self.refiner(
+        # #     student_feats=(fused_tokens0, fused_tokens1, fused_tokens2),
+        # #     teacher_feats=(fused_tokens2, fused_tokens3, fused_tokens4)
+        # # )
 
-        # produce final saliency map by decoder2
-        # _, x0_2 = self.rfb0_2(x)  # [2, 32, 96, 96]
-        # _, x1_2 = self.rfb1_2(x1)  # [2, 32, 96, 96]
-        # _, x5_2 = self.rfb5_2(x5)  # [2, 32, 48, 48]
-        x0_2 = self.rfb0_2(x)
-        x1_2 = self.rfb1_2(x1)
-        x5_2 = self.rfb5_2(x5)
+        # # produce final saliency map by decoder2
+        # # _, x0_2 = self.rfb0_2(x)  # [2, 32, 96, 96]
+        # # _, x1_2 = self.rfb1_2(x1)  # [2, 32, 96, 96]
+        # # _, x5_2 = self.rfb5_2(x5)  # [2, 32, 48, 48]
+        # x0_2 = self.rfb0_2(x)
+        # x1_2 = self.rfb1_2(x1)
+        # x5_2 = self.rfb5_2(x5)
 
-        y = self.agg2(x5_2, x1_2, x0_2)  # [2, 32, 96, 96]
+        # y = self.agg2(x5_2, x1_2, x0_2)  # [2, 32, 96, 96]
 
-        # PTM module
-        y = self.agant1(y)  # [1, 64, 88, 88]
-        y = self.deconv1(y)  # [1, 64, 176, 176]
-        y = self.agant2(y)  # [1, 32, 176, 176]
-        y = self.deconv2(y)  # [1, 32, 352, 352]
-        y = self.out2_conv(y)  # [1, 1, 352, 352]
+        # # PTM module
+        # y = self.agant1(y)  # [1, 64, 88, 88]
+        # y = self.deconv1(y)  # [1, 64, 176, 176]
+        # y = self.agant2(y)  # [1, 32, 176, 176]
+        # y = self.deconv2(y)  # [1, 32, 352, 352]
+        # y = self.out2_conv(y)  # [1, 1, 352, 352]
 
-        s1 = F.interpolate(
-            attention_map, size=y.shape[2:], mode='bilinear', align_corners=True)
-        return s1, y
+        # s1 = F.interpolate(
+        #     attention_map, size=y.shape[2:], mode='bilinear', align_corners=True)
+        return y, y
