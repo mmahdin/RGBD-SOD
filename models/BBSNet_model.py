@@ -1,4 +1,4 @@
-from typing import List, Optional
+from typing import List
 import math
 from typing import Tuple
 import torch.nn.functional as F
@@ -580,6 +580,11 @@ class MultiLevelSaliencyHead(nn.Module):
         self.transformer = nn.TransformerEncoder(
             encoder_layer, num_layers=transformer_layers)
 
+        self.swin = BasicLayer(
+            dim=embed_dim, input_resolution=(96, 96),
+            depth=2, num_heads=transformer_heads, window_size=12, mlp_ratio=4
+        )
+
         # Post-transform norm
         self.post_ln = nn.LayerNorm(embed_dim)
 
@@ -631,7 +636,6 @@ class MultiLevelSaliencyHead(nn.Module):
         """
         B = feats[0].shape[0]
         device = feats[0].device
-        dtype = feats[0].dtype
 
         # Collect per-level maps -> base_grid
         level_maps = []
@@ -675,11 +679,21 @@ class MultiLevelSaliencyHead(nn.Module):
         # back to spatial
         x = tokens.transpose(1, 2).contiguous().view(B, C, H, W)
 
-        # upsample once then decode (keeps it light)
-        # x = F.interpolate(x, size=(self.final_size, self.final_size),
-        #                   mode="bilinear", align_corners=False)
-        # out = self.decoder(x)  # (B,1,final,final)
-        return x
+        x = F.interpolate(x, size=(96, 96), mode="bilinear",
+                          align_corners=False)
+
+        B, C, H, W = x.shape
+        x = x.flatten(2).transpose(1, 2)
+
+        x = self.swin(x)
+
+        x = x.transpose(1, 2).view(B, C, H, W)
+
+        x = F.interpolate(x, size=(self.final_size, self.final_size),
+                          mode="bilinear", align_corners=False)
+
+        out = self.decoder(x)  # (B,1,final,final)
+        return out
 
 
 # ==================================================================
@@ -1167,7 +1181,6 @@ class BBSNetTransformerAttention(BaseModel):
         heads_stage = (4, 4, 8, 8, 8)
         embed_dim = (32, 64, 128, 128, 128)  # embed_dim for each stage
         C = [64, 256, 512, 1024, 2048]           # channel dims from ResNet
-        S = [96, 96, 48, 24, 12]
         P = [8, 8, 4, 2, 1]
 
         # Replace FusionBlock2D with RGBDViTBlock
@@ -1206,26 +1219,6 @@ class BBSNetTransformerAttention(BaseModel):
         # fusion2: [(H/2)/P2 * (H/2)/P2, E2] = [576, 128]
         # fusion3: [(H/4)/P3 * (H/4)/P3, E3] = [144, 128]
         # fusion4: [(H/8)/P4 * (H/8)/P4, E4] = [144, 128]
-
-        # Components of PTM module
-        self.inplanes = 128
-        self.agant1 = self._make_agant_layer(128, 64)
-        self.inplanes = 64
-        self.deconv1 = self._make_transpose(TransBasicBlock, 64, 3, stride=2)
-
-        self.agant2 = self._make_agant_layer(64, 32)
-        self.inplanes = 32
-        self.deconv2 = self._make_transpose(TransBasicBlock, 32, 3, stride=2)
-
-        self.agant3 = self._make_agant_layer(32, 16)
-        self.inplanes = 16
-        self.deconv3 = self._make_transpose(TransBasicBlock, 16, 3, stride=2)
-
-        self.agant4 = self._make_agant_layer(16, 8)
-        self.inplanes = 8
-        self.deconv4 = self._make_transpose(TransBasicBlock, 8, 3, stride=2)
-
-        self.out_conv = nn.Conv2d(8, 1, kernel_size=1, stride=1, bias=True)
 
         if self.training:
             self.initialize_weights()
@@ -1282,16 +1275,5 @@ class BBSNetTransformerAttention(BaseModel):
         # ====================================================================
         y = self.net([fused_tokens0, fused_tokens1,
                      fused_tokens2, fused_tokens3, fused_tokens4])
-
-        y = self.agant1(y)      # -> [2,64,24,24]
-        y = self.deconv1(y)     # -> [2,64,48,48]
-        y = self.agant2(y)      # -> [2,32,48,48]
-        y = self.deconv2(y)     # -> [2,32,96,96]
-        y = self.agant3(y)      # -> [2,16,96,96]
-        y = self.deconv3(y)     # -> [2,16,192,192]
-        y = self.agant4(y)      # -> [2,8,192,192]
-        y = self.deconv4(y)     # -> [2,8,384,384]
-        y = self.out_conv(y)    # -> [2,1,384,384]
-        # print(y.shape)
 
         return y, y
