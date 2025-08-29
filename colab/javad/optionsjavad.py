@@ -6,9 +6,9 @@ version = 'javad'
 parser = argparse.ArgumentParser()
 parser.add_argument('--epoch', type=int, default=200, help='epoch number')
 parser.add_argument('--lr', type=float, default=1e-4, help='learning rate')
-parser.add_argument('--batchsize', type=int, default=15,
+parser.add_argument('--batchsize', type=int, default=10,
                     help='training batch size')
-parser.add_argument('--trainsize', type=int, default=352,
+parser.add_argument('--trainsize', type=int, default=384,
                     help='training dataset size')
 parser.add_argument('--clip', type=float, default=0.5,
                     help='gradient clipping margin')
