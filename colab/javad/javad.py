@@ -159,7 +159,7 @@ def train(train_loader, model, optimizer, epoch, save_path, pending_unembed=None
 
         loss1 = CE(s1, gts)
         loss2 = CE(s2, gts)
-        loss = loss1 + loss2
+        loss = loss1
         loss.backward()
 
         clip_gradient(optimizer, opt.clip)
