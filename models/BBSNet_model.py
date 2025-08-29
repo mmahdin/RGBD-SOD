@@ -266,95 +266,6 @@ class DynamicFusionGate(nn.Module):
         return output
 
 
-class EfficientMultiHeadAttention(nn.Module):
-    """
-    Efficient attention with optional local windowing for high-resolution features
-    """
-
-    def __init__(self, embed_dim: int, num_heads: int, window_size: Optional[int] = None,
-                 attn_dropout: float = 0.0):
-        super().__init__()
-        self.embed_dim = embed_dim
-        self.num_heads = num_heads
-        self.window_size = window_size
-        self.head_dim = embed_dim // num_heads
-        assert self.head_dim * num_heads == embed_dim, "embed_dim must be divisible by num_heads"
-
-        self.q_proj = nn.Linear(embed_dim, embed_dim)
-        self.k_proj = nn.Linear(embed_dim, embed_dim)
-        self.v_proj = nn.Linear(embed_dim, embed_dim)
-        self.out_proj = nn.Linear(embed_dim, embed_dim)
-
-        self.attn_dropout = nn.Dropout(attn_dropout)
-        self.proj_dropout = nn.Dropout(attn_dropout)
-
-    def forward(self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor,
-                attn_mask=None) -> torch.Tensor:
-        # query, key, value: (L, B, E)
-        L, B, E = query.shape
-        H = self.num_heads
-        D = self.head_dim
-
-        # Project to query, key, value
-        q = self.q_proj(query).view(L, B, H, D).transpose(0, 1)  # (B, H, L, D)
-        k = self.k_proj(key).view(L, B, H, D).transpose(0, 1)    # (B, H, L, D)
-        v = self.v_proj(value).view(L, B, H, D).transpose(0, 1)  # (B, H, L, D)
-
-        # Apply local window attention if window_size is specified
-        if self.window_size is not None and L > self.window_size:
-            # Reshape to (B, H, L//ws, ws, D) where ws is window_size
-            ws = self.window_size
-            pad_len = (ws - L % ws) % ws
-            if pad_len > 0:
-                q = F.pad(q, (0, 0, 0, pad_len))
-                k = F.pad(k, (0, 0, 0, pad_len))
-                v = F.pad(v, (0, 0, 0, pad_len))
-
-            new_L = L + pad_len
-            q = q.contiguous().view(B, H, new_L // ws, ws, D)
-            k = k.contiguous().view(B, H, new_L // ws, ws, D)
-            v = v.contiguous().view(B, H, new_L // ws, ws, D)
-
-            # Compute attention within each window
-            attn_weights = torch.matmul(
-                q, k.transpose(-2, -1)) / (D ** 0.5)  # (B, H, L//ws, ws, ws)
-
-            if attn_mask is not None:
-                attn_weights = attn_weights + attn_mask
-
-            attn_weights = F.softmax(attn_weights, dim=-1)
-            attn_weights = self.attn_dropout(attn_weights)
-
-            # Apply attention to values
-            attn_output = torch.matmul(attn_weights, v)  # (B, H, L//ws, ws, D)
-
-            # Reshape back to (B, H, L, D)
-            attn_output = attn_output.view(B, H, new_L, D)
-            if pad_len > 0:
-                attn_output = attn_output[:, :, :L, :]  # remove padding
-        else:
-            # Standard global attention
-            attn_weights = torch.matmul(
-                q, k.transpose(-2, -1)) / (D ** 0.5)  # (B, H, L, L)
-
-            if attn_mask is not None:
-                attn_weights = attn_weights + attn_mask
-
-            attn_weights = F.softmax(attn_weights, dim=-1)
-            attn_weights = self.attn_dropout(attn_weights)
-
-            # Apply attention to values
-            attn_output = torch.matmul(attn_weights, v)  # (B, H, L, D)
-
-        # Reshape and project back
-        attn_output = attn_output.transpose(
-            0, 1).contiguous().view(L, B, E)  # (L, B, E)
-        attn_output = self.out_proj(attn_output)
-        attn_output = self.proj_dropout(attn_output)
-
-        return attn_output
-
-
 class PatchEmbedConv(nn.Module):
     """
     Improved patch embedding with optional overlapping patches
@@ -378,6 +289,17 @@ class PatchEmbedConv(nn.Module):
 
         self.norm = nn.LayerNorm(embed_dim)
         self.pos_embed = None
+
+    @staticmethod
+    def get_output_hw(H: int, W: int, kernel_size: int, stride: int, padding: int, dilation: int = 1) -> Tuple[int, int]:
+        """
+        Compute output H' and W' for a Conv2D layer.
+        """
+        H_out = (H + 2 * padding - dilation *
+                 (kernel_size - 1) - 1) // stride + 1
+        W_out = (W + 2 * padding - dilation *
+                 (kernel_size - 1) - 1) // stride + 1
+        return H_out, W_out
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, Tuple[int, int]]:
         B, C, H, W = x.shape
@@ -496,10 +418,25 @@ class RGBDViTBlock(nn.Module):
                  mlp_ratio: float = 4.0,
                  attn_dropout: float = 0.0,
                  dropout: float = 0.0,
+                 shape: int = 12,
+                 swin_depth: int = 2,
                  window_size: Optional[int] = None,
                  use_overlap: bool = False):
         super().__init__()
         self.patch_size = patch_size
+        self.shape = shape
+
+        if use_overlap:
+            input_resolution = PatchEmbedConv.get_output_hw(
+                shape, shape, kernel_size=patch_size, stride=patch_size//2, padding=patch_size//4)
+        else:
+            input_resolution = [shape // patch_size, shape // patch_size]
+
+        self.input_resolution = input_resolution
+        if window_size is None:
+            window_size = shape
+
+        self.window_size = window_size
 
         # Patch embedders with optional overlapping
         self.rgb_patch = PatchEmbedConv(
@@ -508,16 +445,30 @@ class RGBDViTBlock(nn.Module):
             in_ch_t, embed_dim, patch_size, use_overlap)
 
         # Self-attention for each modality with optional windowing
-        self.rgb_self_attn = EfficientMultiHeadAttention(
-            embed_dim, num_heads, window_size, attn_dropout)
-        self.dep_self_attn = EfficientMultiHeadAttention(
-            embed_dim, num_heads, window_size, attn_dropout)
+        self.rgb_self_attn = BasicLayer(
+            dim=embed_dim, input_resolution=input_resolution,
+            depth=swin_depth, num_heads=num_heads, window_size=window_size,
+            mlp_ratio=mlp_ratio, attn_drop=attn_dropout
+        )
+        # self.rgb_self_attn = EfficientMultiHeadAttention(
+        #     embed_dim, num_heads, window_size, attn_dropout)
+        self.dep_self_attn = BasicLayer(
+            dim=embed_dim, input_resolution=input_resolution,
+            depth=swin_depth, num_heads=num_heads, window_size=window_size,
+            mlp_ratio=mlp_ratio, attn_drop=attn_dropout
+        )
 
         # Cross-attention
-        self.rgb_cross_attn = EfficientMultiHeadAttention(
-            embed_dim, num_heads, window_size, attn_dropout)
-        self.dep_cross_attn = EfficientMultiHeadAttention(
-            embed_dim, num_heads, window_size, attn_dropout)
+        self.rgb_cross_attn = BasicLayer(
+            dim=embed_dim, input_resolution=input_resolution,
+            depth=swin_depth, num_heads=num_heads, window_size=window_size,
+            mlp_ratio=mlp_ratio, attn_drop=attn_dropout, cross_attention=True
+        )
+        self.dep_cross_attn = BasicLayer(
+            dim=embed_dim, input_resolution=input_resolution,
+            depth=swin_depth, num_heads=num_heads, window_size=window_size,
+            mlp_ratio=mlp_ratio, attn_drop=attn_dropout, cross_attention=True
+        )
 
         # Dynamic fusion gate
         self.fusion_gate = DynamicFusionGate(embed_dim, num_modalities=4)
@@ -551,13 +502,23 @@ class RGBDViTBlock(nn.Module):
         # Ensure unembed module is created
         self._ensure_unembed(Hp, Wp, Cr, device)
 
+        rgb_tokens = rgb_tokens.permute(1, 0, 2)
+        dep_tokens = dep_tokens.permute(1, 0, 2)
+
         # Self-attention
-        rgb_self = self.rgb_self_attn(rgb_tokens, rgb_tokens, rgb_tokens)
-        dep_self = self.dep_self_attn(dep_tokens, dep_tokens, dep_tokens)
+        rgb_self = self.rgb_self_attn(rgb_tokens)
+        dep_self = self.dep_self_attn(dep_tokens)
 
         # Cross-attention
-        rgb_cross = self.rgb_cross_attn(rgb_tokens, dep_tokens, dep_tokens)
-        dep_cross = self.dep_cross_attn(dep_tokens, rgb_tokens, rgb_tokens)
+        rgb_cross = self.rgb_cross_attn(rgb_tokens, dep_tokens)
+        dep_cross = self.dep_cross_attn(dep_tokens, rgb_tokens)
+
+        rgb_self = rgb_self.permute(1, 0, 2)
+        dep_self = dep_self.permute(1, 0, 2)
+        rgb_cross = rgb_cross.permute(1, 0, 2)
+        dep_cross = dep_cross.permute(1, 0, 2)
+        rgb_tokens = rgb_tokens.permute(1, 0, 2)
+        dep_tokens = dep_tokens.permute(1, 0, 2)
 
         # Dynamic fusion instead of simple addition
         fused_tokens = self.fusion_gate(
@@ -805,6 +766,7 @@ class BBSNetTransformerAttention(BaseModel):
         # Increased early embed_dims for better representation
         embed_stage = (64, 64, 128, 128, 128)
         C = [64, 256, 512, 1024, 2048]
+        S = [96, 96, 48, 24, 12]
 
         # More appropriate patch sizes for each stage
         patch_size = [4, 4, 2, 1, 1]  # Smaller patches for early layers
@@ -819,31 +781,31 @@ class BBSNetTransformerAttention(BaseModel):
 
         # Replace FusionBlock2D with improved RGBDViTBlock
         self.fuse0 = RGBDViTBlock(
-            in_ch_r=C[0], in_ch_t=C[0],
+            in_ch_r=C[0], in_ch_t=C[0], shape=S[0],
             embed_dim=embed_stage[0], num_heads=heads_stage[0],
             patch_size=patch_size[0], dropout=dropout, attn_dropout=dropout,
             window_size=window_sizes[0], use_overlap=use_overlap[0]
         )
         self.fuse1 = RGBDViTBlock(
-            in_ch_r=C[1], in_ch_t=C[1],
+            in_ch_r=C[1], in_ch_t=C[1], shape=S[1],
             embed_dim=embed_stage[1], num_heads=heads_stage[1],
             patch_size=patch_size[1], dropout=dropout, attn_dropout=dropout,
             window_size=window_sizes[1], use_overlap=use_overlap[1]
         )
         self.fuse2 = RGBDViTBlock(
-            in_ch_r=C[2], in_ch_t=C[2],
+            in_ch_r=C[2], in_ch_t=C[2], shape=S[2],
             embed_dim=embed_stage[2], num_heads=heads_stage[2],
             patch_size=patch_size[2], dropout=dropout, attn_dropout=dropout,
             window_size=window_sizes[2], use_overlap=use_overlap[2]
         )
         self.fuse3_1 = RGBDViTBlock(
-            in_ch_r=C[3], in_ch_t=C[3],
+            in_ch_r=C[3], in_ch_t=C[3], shape=S[3],
             embed_dim=embed_stage[3], num_heads=heads_stage[3],
             patch_size=patch_size[3], dropout=dropout, attn_dropout=dropout,
             window_size=window_sizes[3], use_overlap=use_overlap[3]
         )
         self.fuse4_1 = RGBDViTBlock(
-            in_ch_r=C[4], in_ch_t=C[4],
+            in_ch_r=C[4], in_ch_t=C[4], shape=S[4],
             embed_dim=embed_stage[4], num_heads=heads_stage[4],
             patch_size=patch_size[4], dropout=dropout, attn_dropout=dropout,
             window_size=window_sizes[4], use_overlap=use_overlap[4]

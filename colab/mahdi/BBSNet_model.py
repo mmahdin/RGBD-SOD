@@ -1,10 +1,10 @@
-from typing import Tuple
+from typing import Tuple, Optional
 import torch.nn.functional as F
 from torchvision.models import resnet50, ResNet50_Weights
 import torch
 import torch.nn as nn
 from models.ResNet import ResNet50
-from models.swin_transformer import BasicLayer
+from models.swin_cross import BasicLayer
 
 
 def conv3x3(in_planes, out_planes, stride=1):
@@ -233,54 +233,209 @@ class Refine(nn.Module):
 # =========================
 # Attention Blocks
 # =========================
+
+
+class DynamicFusionGate(nn.Module):
+    """
+    Dynamic gating mechanism to weight the contributions of different attention outputs
+    """
+
+    def __init__(self, embed_dim: int, num_modalities: int = 4):
+        super().__init__()
+        self.embed_dim = embed_dim
+        self.gate_net = nn.Sequential(
+            nn.Linear(embed_dim * num_modalities, embed_dim),
+            nn.GELU(),
+            nn.Linear(embed_dim, num_modalities),
+            nn.Softmax(dim=-1)
+        )
+
+    def forward(self, *inputs):
+        # inputs: list of (L, B, E) tensors
+        stacked = torch.stack(inputs, dim=2)  # (L, B, num_modalities, E)
+        B, L, num_mod, E = stacked.shape[1], stacked.shape[0], stacked.shape[2], stacked.shape[3]
+
+        # Compute gating weights
+        flat = stacked.reshape(L, B, num_mod * E)
+        weights = self.gate_net(flat)  # (L, B, num_modalities)
+
+        # Apply weights
+        weighted = stacked * weights.unsqueeze(-1)  # (L, B, num_modalities, E)
+        output = torch.sum(weighted, dim=2)  # (L, B, E)
+
+        return output
+
+
+class EfficientMultiHeadAttention(nn.Module):
+    """
+    Efficient attention with optional local windowing for high-resolution features
+    """
+
+    def __init__(self, embed_dim: int, num_heads: int, window_size: Optional[int] = None,
+                 attn_dropout: float = 0.0):
+        super().__init__()
+        self.embed_dim = embed_dim
+        self.num_heads = num_heads
+        self.window_size = window_size
+        self.head_dim = embed_dim // num_heads
+        assert self.head_dim * num_heads == embed_dim, "embed_dim must be divisible by num_heads"
+
+        self.q_proj = nn.Linear(embed_dim, embed_dim)
+        self.k_proj = nn.Linear(embed_dim, embed_dim)
+        self.v_proj = nn.Linear(embed_dim, embed_dim)
+        self.out_proj = nn.Linear(embed_dim, embed_dim)
+
+        self.attn_dropout = nn.Dropout(attn_dropout)
+        self.proj_dropout = nn.Dropout(attn_dropout)
+
+    def forward(self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor,
+                attn_mask=None) -> torch.Tensor:
+        # query, key, value: (L, B, E)
+        L, B, E = query.shape
+        H = self.num_heads
+        D = self.head_dim
+
+        # Project to query, key, value
+        q = self.q_proj(query).view(L, B, H, D).transpose(0, 1)  # (B, H, L, D)
+        k = self.k_proj(key).view(L, B, H, D).transpose(0, 1)    # (B, H, L, D)
+        v = self.v_proj(value).view(L, B, H, D).transpose(0, 1)  # (B, H, L, D)
+
+        # Apply local window attention if window_size is specified
+        if self.window_size is not None and L > self.window_size:
+            # Reshape to (B, H, L//ws, ws, D) where ws is window_size
+            ws = self.window_size
+            pad_len = (ws - L % ws) % ws
+            if pad_len > 0:
+                q = F.pad(q, (0, 0, 0, pad_len))
+                k = F.pad(k, (0, 0, 0, pad_len))
+                v = F.pad(v, (0, 0, 0, pad_len))
+
+            new_L = L + pad_len
+            q = q.contiguous().view(B, H, new_L // ws, ws, D)
+            k = k.contiguous().view(B, H, new_L // ws, ws, D)
+            v = v.contiguous().view(B, H, new_L // ws, ws, D)
+
+            # Compute attention within each window
+            attn_weights = torch.matmul(
+                q, k.transpose(-2, -1)) / (D ** 0.5)  # (B, H, L//ws, ws, ws)
+
+            if attn_mask is not None:
+                attn_weights = attn_weights + attn_mask
+
+            attn_weights = F.softmax(attn_weights, dim=-1)
+            attn_weights = self.attn_dropout(attn_weights)
+
+            # Apply attention to values
+            attn_output = torch.matmul(attn_weights, v)  # (B, H, L//ws, ws, D)
+
+            # Reshape back to (B, H, L, D)
+            attn_output = attn_output.view(B, H, new_L, D)
+            if pad_len > 0:
+                attn_output = attn_output[:, :, :L, :]  # remove padding
+        else:
+            # Standard global attention
+            attn_weights = torch.matmul(
+                q, k.transpose(-2, -1)) / (D ** 0.5)  # (B, H, L, L)
+
+            if attn_mask is not None:
+                attn_weights = attn_weights + attn_mask
+
+            attn_weights = F.softmax(attn_weights, dim=-1)
+            attn_weights = self.attn_dropout(attn_weights)
+
+            # Apply attention to values
+            attn_output = torch.matmul(attn_weights, v)  # (B, H, L, D)
+
+        # Reshape and project back
+        attn_output = attn_output.transpose(
+            0, 1).contiguous().view(L, B, E)  # (L, B, E)
+        attn_output = self.out_proj(attn_output)
+        attn_output = self.proj_dropout(attn_output)
+
+        return attn_output
+
+
 class PatchEmbedConv(nn.Module):
     """
-    Patchify via a conv layer: conv(in_ch -> embed_dim, kernel_size=patch_size, stride=patch_size)
-    Input: (B, C, H, W)
-    Output tokens: (L, B, embed_dim) where L = (H/ps)*(W/ps)
-    Also returns spatial size (H', W') for unpatchify.
+    Improved patch embedding with optional overlapping patches
     """
 
-    def __init__(self, in_ch: int, embed_dim: int, patch_size: int):
+    def __init__(self, in_ch: int, embed_dim: int, patch_size: int, overlap: bool = False):
         super().__init__()
-        assert patch_size >= 1
         self.patch_size = patch_size
-        self.proj = nn.Conv2d(
-            in_ch, embed_dim, kernel_size=patch_size, stride=patch_size)
-        self.norm = nn.LayerNorm(embed_dim)
+        self.overlap = overlap
 
-        # Initialize pos_embed later because L = H/ps * W/ps is unknown until forward
+        if overlap:
+            # Use overlapping patches with stride = patch_size//2
+            stride = max(1, patch_size // 2)
+            padding = patch_size // 4  # Adjust padding to maintain size
+            self.proj = nn.Conv2d(in_ch, embed_dim, kernel_size=patch_size,
+                                  stride=stride, padding=padding)
+        else:
+            # Non-overlapping patches
+            self.proj = nn.Conv2d(
+                in_ch, embed_dim, kernel_size=patch_size, stride=patch_size)
+
+        self.norm = nn.LayerNorm(embed_dim)
         self.pos_embed = None
+
+    @staticmethod
+    def get_output_hw(H: int, W: int, kernel_size: int, stride: int, padding: int, dilation: int = 1) -> Tuple[int, int]:
+        """
+        Compute output H' and W' for a Conv2D layer.
+        """
+        H_out = (H + 2 * padding - dilation *
+                 (kernel_size - 1) - 1) // stride + 1
+        W_out = (W + 2 * padding - dilation *
+                 (kernel_size - 1) - 1) // stride + 1
+        return H_out, W_out
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, Tuple[int, int]]:
         B, C, H, W = x.shape
-        assert H % self.patch_size == 0 and W % self.patch_size == 0, \
-            f"H ({H}) and W ({W}) must be divisible by patch_size ({self.patch_size})"
 
         x_p = self.proj(x)  # (B, embed_dim, H', W')
         B, E, Hp, Wp = x_p.shape
         tokens = x_p.flatten(2).transpose(1, 2)  # (B, L, E), L = Hp*Wp
 
-        # --- Add learnable positional embeddings ---
+        # Add learnable positional embeddings
         L = tokens.shape[1]
         if self.pos_embed is None or self.pos_embed.shape[1] != L:
-            # Create learnable pos embedding per patch location
             self.pos_embed = nn.Parameter(
                 torch.zeros(1, L, E, device=x.device))
             nn.init.trunc_normal_(self.pos_embed, std=0.02)
 
-        tokens = tokens + self.pos_embed  # (B, L, E)
-
+        tokens = tokens + self.pos_embed
         tokens = self.norm(tokens)
         tokens = tokens.transpose(0, 1)  # (L, B, E)
+
         return tokens, (Hp, Wp)
+
+
+class LearnedUpsample(nn.Module):
+    """
+    Learned upsampling using transposed convolution instead of simple interpolation
+    """
+
+    def __init__(self, in_ch: int, out_ch: int, scale_factor: int):
+        super().__init__()
+        self.scale_factor = scale_factor
+        self.conv = nn.ConvTranspose2d(
+            in_ch, out_ch, kernel_size=scale_factor,
+            stride=scale_factor, groups=min(in_ch, out_ch)
+        )
+
+    def forward(self, x: torch.Tensor, target_size: Tuple[int, int]) -> torch.Tensor:
+        x = self.conv(x)
+        # Ensure exact target size (handles edge cases)
+        if x.shape[2:] != target_size:
+            x = F.interpolate(x, size=target_size,
+                              mode='bilinear', align_corners=False)
+        return x
 
 
 class PatchUnembedConv(nn.Module):
     """
-    Project token embeddings back to spatial feature map and upsample to original HxW.
-    - in_tokens: (L, B, embed_dim)
-    - returns: (B, out_ch, H, W) that can be added to original Ri
+    Improved unembedding with learned upsampling
     """
 
     def __init__(self, embed_dim: int, out_ch: int, patch_size: int, Hp: int, Wp: int):
@@ -288,56 +443,30 @@ class PatchUnembedConv(nn.Module):
         self.embed_dim = embed_dim
         self.out_ch = out_ch
         self.patch_size = patch_size
-        # project embed_dim -> out_ch (for each low-res spatial location)
-        self.to_spatial = nn.Linear(embed_dim, out_ch)
         self.Hp = Hp
         self.Wp = Wp
 
+        # Project to output channels
+        self.to_spatial = nn.Linear(embed_dim, out_ch)
+
+        # Learned upsampling instead of simple interpolation
+        self.upsample = LearnedUpsample(out_ch, out_ch, patch_size)
+
     def forward(self, tokens: torch.Tensor, target_hw: Tuple[int, int]) -> torch.Tensor:
-        # tokens: (L, B, E)
         L, B, E = tokens.shape
-        Hp = self.Hp
-        Wp = self.Wp
+        Hp, Wp = self.Hp, self.Wp
         assert L == Hp * Wp, "token length doesn't match Hp*Wp"
 
-        # to (B, L, out_ch)
+        # Convert tokens to spatial feature map
         t = tokens.transpose(0, 1)  # (B, L, E)
         t = self.to_spatial(t)      # (B, L, out_ch)
-        # reshape to (B, out_ch, Hp, Wp)
-        t = t.transpose(1, 2).contiguous().view(B, self.out_ch, Hp, Wp)
-        # upsample to original H, W
-        H, W = target_hw
-        if (Hp * self.patch_size, Wp * self.patch_size) != (H, W):
-            # just in case target_hw provided doesn't match, compute desired scale
-            t = F.interpolate(t, size=(H, W), mode='bilinear',
-                              align_corners=False)
-        else:
-            t = F.interpolate(t, scale_factor=self.patch_size,
-                              mode='bilinear', align_corners=False)
+        t = t.transpose(1, 2).contiguous().view(
+            B, self.out_ch, Hp, Wp)  # (B, out_ch, Hp, Wp)
+
+        # Upsample to target size using learned upsampling
+        t = self.upsample(t, target_hw)
+
         return t
-
-
-class CrossMultiHeadAttention(nn.Module):
-    """
-    Wrapper for cross-attention using nn.MultiheadAttention.
-    - query: (Lq, B, E)
-    - key/value: (Lk, B, E)
-    Returns: attn_out shape (Lq, B, E)
-    """
-
-    def __init__(self, embed_dim: int, num_heads: int, attn_dropout: float = 0.0):
-        super().__init__()
-        self.mha = nn.MultiheadAttention(
-            embed_dim, num_heads, dropout=attn_dropout, batch_first=False)
-        self.dropout = nn.Dropout(attn_dropout)
-        self.proj = nn.Identity()  # placeholder if you want an output linear
-
-    def forward(self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, attn_mask=None):
-        # query: (Lq, B, E), key/value: (Lk, B, E)
-        # nn.MultiheadAttention expects (L, B, E) when batch_first=False
-        attn_out, _ = self.mha(query, key, value, attn_mask=attn_mask)
-        attn_out = self.dropout(attn_out)
-        return self.proj(attn_out)
 
 
 class FeedForward(nn.Module):
@@ -350,8 +479,6 @@ class FeedForward(nn.Module):
         self.norm = nn.LayerNorm(dim)
 
     def forward(self, x):
-        # x: (L, B, E)
-        # apply LN over last dim: easier to transpose to (B,L,E)
         x_t = x.transpose(0, 1)   # (B, L, E)
         y = self.norm(x_t)
         y = self.fc1(y)
@@ -365,22 +492,10 @@ class FeedForward(nn.Module):
 
 class RGBDViTBlock(nn.Module):
     """
-    Single-level fusion block using:
-      - self-attention (per modality)
-      - cross-attention (query=RGB, key/value=Depth and vice-versa)
-      - MLP (token-wise)
-      - residual connections back to original Ri/Ti feature maps.
-
-    Input:
-      Ri: (B, C_r, H, W)  - RGB features from ResNet
-      Ti: (B, C_t, H, W)  - Depth features from separate ResNet (same spatial size)
-    Output:
-      Fr: (B, C_r, H, W)  - fused RGB features
-      Ft: (B, C_t, H, W)  - fused Depth features
-
-    Notes:
-      - patch_size must divide H and W.
-      - embed_dim: dimension used inside attention tokens.
+    Improved fusion block with:
+    - Dynamic gated fusion
+    - Efficient windowed attention for high-resolution features
+    - Better tokenization and reconstruction
     """
 
     def __init__(self,
@@ -391,331 +506,126 @@ class RGBDViTBlock(nn.Module):
                  patch_size: int = 4,
                  mlp_ratio: float = 4.0,
                  attn_dropout: float = 0.0,
-                 dropout: float = 0.0):
+                 dropout: float = 0.0,
+                 shape: int = 12,
+                 swin_depth: int = 2,
+                 window_size: Optional[int] = None,
+                 use_overlap: bool = False):
         super().__init__()
         self.patch_size = patch_size
-        # Patch embedders for each modality (conv-based)
-        self.rgb_patch = PatchEmbedConv(in_ch_r, embed_dim, patch_size)
-        self.dep_patch = PatchEmbedConv(in_ch_t, embed_dim, patch_size)
+        self.shape = shape
 
-        # Self-attention for each modality
-        self.rgb_self_attn = CrossMultiHeadAttention(
-            embed_dim, num_heads, attn_dropout)
-        self.dep_self_attn = CrossMultiHeadAttention(
-            embed_dim, num_heads, attn_dropout)
+        if use_overlap:
+            input_resolution = PatchEmbedConv.get_output_hw(
+                shape, shape, kernel_size=patch_size, stride=patch_size//2, padding=patch_size//4)
+        else:
+            input_resolution = [shape // patch_size, shape // patch_size]
 
-        # Cross-attention: rgb queries, depth keys/vals and vice versa
-        self.rgb_cross_attn = CrossMultiHeadAttention(
-            embed_dim, num_heads, attn_dropout)
-        self.dep_cross_attn = CrossMultiHeadAttention(
-            embed_dim, num_heads, attn_dropout)
+        self.input_resolution = input_resolution
+        if window_size is None:
+            window_size = shape
 
-        # MLPs
+        self.window_size = window_size
+
+        # Patch embedders with optional overlapping
+        self.rgb_patch = PatchEmbedConv(
+            in_ch_r, embed_dim, patch_size, use_overlap)
+        self.dep_patch = PatchEmbedConv(
+            in_ch_t, embed_dim, patch_size, use_overlap)
+
+        # Self-attention for each modality with optional windowing
+        self.rgb_self_attn = BasicLayer(
+            dim=embed_dim, input_resolution=input_resolution,
+            depth=swin_depth, num_heads=num_heads, window_size=window_size,
+            mlp_ratio=mlp_ratio, attn_drop=attn_dropout
+        )
+        # self.rgb_self_attn = EfficientMultiHeadAttention(
+        #     embed_dim, num_heads, window_size, attn_dropout)
+        self.dep_self_attn = BasicLayer(
+            dim=embed_dim, input_resolution=input_resolution,
+            depth=swin_depth, num_heads=num_heads, window_size=window_size,
+            mlp_ratio=mlp_ratio, attn_drop=attn_dropout
+        )
+
+        # Cross-attention
+        self.rgb_cross_attn = BasicLayer(
+            dim=embed_dim, input_resolution=input_resolution,
+            depth=swin_depth, num_heads=num_heads, window_size=window_size,
+            mlp_ratio=mlp_ratio, attn_drop=attn_dropout, cross_attention=True
+        )
+        self.dep_cross_attn = BasicLayer(
+            dim=embed_dim, input_resolution=input_resolution,
+            depth=swin_depth, num_heads=num_heads, window_size=window_size,
+            mlp_ratio=mlp_ratio, attn_drop=attn_dropout, cross_attention=True
+        )
+
+        # Dynamic fusion gate
+        self.fusion_gate = DynamicFusionGate(embed_dim, num_modalities=4)
+
+        # MLP
         hidden_dim = int(embed_dim * mlp_ratio)
         self.mlp = FeedForward(embed_dim, hidden_dim, dropout)
 
-        # Project back to original channel counts
-        self._out_proj = None  # placeholder
+        # Output projection (will be created in forward)
+        self._out_proj = None
 
-    def _ensure_unembed(self, Hp, Wp, in_ch_r, in_ch_t, device):
-        if (self._out_proj is None) or (self._out_proj.Hp != Hp):
-            self._out_proj = PatchUnembedConv(embed_dim=self.rgb_patch.proj.out_channels,
-                                              out_ch=in_ch_r,
-                                              patch_size=self.patch_size,
-                                              Hp=Hp, Wp=Wp)
-            # move to device
-            self._out_proj.to(device)
+    def _ensure_unembed(self, Hp, Wp, out_ch, device):
+        if self._out_proj is None or self._out_proj.Hp != Hp or self._out_proj.Wp != Wp:
+            self._out_proj = PatchUnembedConv(
+                embed_dim=self.rgb_patch.proj.out_channels,
+                out_ch=out_ch,
+                patch_size=self.patch_size,
+                Hp=Hp, Wp=Wp
+            ).to(device)
 
-    def forward(self, Ri: torch.Tensor, Ti: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Ri: (B, C_r, H, W)
-        Ti: (B, C_t, H, W)
-        returns: Fr, Ft same shapes as Ri and Ti
-        """
+    def forward(self, Ri: torch.Tensor, Ti: torch.Tensor) -> torch.Tensor:
         B, Cr, H, W = Ri.shape
         B2, Ct, H2, W2 = Ti.shape
         assert B == B2 and H == H2 and W == W2, "Inputs must have same batch and spatial dims"
         device = Ri.device
 
+        # Patchify both modalities
         rgb_tokens, (Hp, Wp) = self.rgb_patch(Ri)  # (L, B, E)
         dep_tokens, _ = self.dep_patch(Ti)
 
-        self._ensure_unembed(Hp, Wp, Cr, Ct, device)
+        # Ensure unembed module is created
+        self._ensure_unembed(Hp, Wp, Cr, device)
 
-        rgb_self = self.rgb_self_attn(rgb_tokens, rgb_tokens, rgb_tokens)
-        dep_self = self.dep_self_attn(dep_tokens, dep_tokens, dep_tokens)
-        self_attention = rgb_self + dep_self
+        rgb_tokens = rgb_tokens.permute(1, 0, 2)
+        dep_tokens = dep_tokens.permute(1, 0, 2)
 
-        rgb_cross = self.rgb_cross_attn(rgb_tokens, dep_tokens, dep_tokens)
-        dep_cross = self.dep_cross_attn(dep_tokens, rgb_tokens, rgb_tokens)
-        cross_attention = rgb_cross + dep_cross
+        # Self-attention
+        rgb_self = self.rgb_self_attn(rgb_tokens)
+        dep_self = self.dep_self_attn(dep_tokens)
 
-        o = self_attention + cross_attention + rgb_tokens
+        # Cross-attention
+        rgb_cross = self.rgb_cross_attn(rgb_tokens, dep_tokens)
+        dep_cross = self.dep_cross_attn(dep_tokens, rgb_tokens)
 
-        m = self.mlp(o)
+        rgb_self = rgb_self.permute(1, 0, 2)
+        dep_self = dep_self.permute(1, 0, 2)
+        rgb_cross = rgb_cross.permute(1, 0, 2)
+        dep_cross = dep_cross.permute(1, 0, 2)
+        rgb_tokens = rgb_tokens.permute(1, 0, 2)
+        dep_tokens = dep_tokens.permute(1, 0, 2)
 
-        f = self._out_proj(m, (H, W)) + Ri
+        # Dynamic fusion instead of simple addition
+        fused_tokens = self.fusion_gate(
+            rgb_self, dep_self, rgb_cross, dep_cross)
+        fused_tokens = fused_tokens + rgb_tokens  # Residual connection
 
-        return f, torch.permute(m + rgb_tokens, (1, 0, 2))
+        # MLP
+        mlp_out = self.mlp(fused_tokens)
+        fused_tokens = fused_tokens + mlp_out  # Another residual connection
 
+        # Convert back to spatial feature map
+        f = self._out_proj(fused_tokens, (H, W))
 
-# ==================================================================
-
-class TransformerGCM(nn.Module):
-    """
-    Transformer-based reimplementation of GCM with multi-branch token mixers,
-    residual fusion, and optional unpatchify back to a feature map.
-
-    Inputs:
-      x_tokens: [B, N, D] (e.g., [1, 121, 128])
-      grid_size: (H, W) tokens (e.g., (11, 11))
-      If return_tokens=False, will unpatchify to [B, C_out, H*p, W*p] using patch_size=p.
-
-    Args:
-      dim: token embedding dim D
-      heads: attention heads per branch
-      out_channels: channels for the returned image-like tensor
-      patch_size: ViT patch size used before fusion (so 4 when 44/11=4)
-      mlp_ratio: MLP expansion
-    """
-
-    def __init__(
-        self,
-        dim: int = 128,
-        input_resolution=(11, 11),
-        window_size=1,
-        heads: int = 4,
-        depth=1,
-        out_channels: int = 32,
-        patch_size: int = 4,
-        mlp_ratio: float = 4.0,
-        output_shape=(44, 44),
-        attn_drop: float = 0.0,
-        proj_drop: float = 0.0,
-    ):
-        super().__init__()
-        self.dim = dim
-        self.heads = heads
-        self.patch_size = patch_size
-        self.out_channels = out_channels
-        self.input_resolution = input_resolution
-        self.output_shape = output_shape
-
-        self.branch1_attn = BasicLayer(
-            dim=dim, input_resolution=input_resolution,
-            depth=depth, num_heads=heads, window_size=window_size, mlp_ratio=mlp_ratio
-        )
-
-        self._out_proj = PatchUnembedConv(embed_dim=dim,
-                                          out_ch=out_channels,
-                                          patch_size=self.patch_size,
-                                          Hp=input_resolution[0], Wp=input_resolution[0])
-
-    def forward(
-        self,
-        x_tokens: torch.Tensor
-    ):
-        """
-        x_tokens: [B, N, D]
-        grid_size: (H, W) token grid (e.g., (11,11))
-        """
-        H, W = self.input_resolution
-
-        b1 = self.branch1_attn(x_tokens)
-        b1p = b1.permute(1, 0, 2)
-        return b1, self._out_proj(b1p, self.output_shape)
-
-
-class aggregation_final_swin(nn.Module):
-
-    def __init__(self, channel):
-        super(aggregation_final_swin, self).__init__()
-        self.relu = nn.ReLU(True)
-
-        self.mode = 'bilinear'
-        self.align_corners = True
-
-        self.conv_upsample1 = BasicConv2d(channel, channel, 3, padding=1)
-        self.conv_upsample2 = BasicConv2d(channel, channel, 3, padding=1)
-        self.conv_upsample3 = BasicConv2d(channel, channel, 3, padding=1)
-        self.conv_upsample4 = BasicConv2d(channel, channel, 3, padding=1)
-        self.conv_upsample5 = BasicConv2d(2*channel, 2*channel, 3, padding=1)
-
-        self.conv_concat2 = BasicConv2d(2*channel, 2*channel, 3, padding=1)
-        self.conv_concat3 = BasicConv2d(3*channel, 3*channel, 3, padding=1)
-
-    def forward(self, x1, x2, x3):
-        # x1: [1, 32, 24, 24]
-        # x2: [1, 32, 48, 48]
-        # x3: [1, 32, 96, 96]
-
-        x1u = F.interpolate(
-            x1, size=x3.shape[2:], mode=self.mode, align_corners=self.align_corners)
-        x2u = F.interpolate(
-            x2, size=x3.shape[2:], mode=self.mode, align_corners=self.align_corners)
-        x2_1 = self.conv_upsample1(x1u) * x2u
-
-        x3_1 = self.conv_upsample2(x1u) \
-            * self.conv_upsample3(x2u) * x3
-
-        x2_2 = torch.cat((x2_1, self.conv_upsample4(x1u)), 1)
-        x2_2 = self.conv_concat2(x2_2)
-
-        x3_2 = torch.cat((x3_1, self.conv_upsample5(x2_2)), 1)
-        x3_2 = self.conv_concat3(x3_2)
-
-        return x3_2
-
-
-class RMSNorm(nn.Module):
-    def __init__(self, dim, eps=1e-8):
-        super().__init__()
-        self.scale = nn.Parameter(torch.ones(dim))
-        self.eps = eps
-
-    def forward(self, x):
-        norm_x = x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
-        return self.scale * norm_x
-
-
-class SwiGLU(nn.Module):
-    def __init__(self, dim, hidden_dim):
-        super().__init__()
-        self.w1 = nn.Linear(dim, hidden_dim * 2)
-        self.w2 = nn.Linear(hidden_dim, dim)
-
-    def forward(self, x):
-        x_proj = self.w1(x)
-        x1, x2 = x_proj.chunk(2, dim=-1)
-        return self.w2(F.silu(x1) * x2)
-
-
-class CrossAttentionRefiner(nn.Module):
-    def __init__(self, student_dim, teacher_dim, hidden_dim=None, num_heads=4, dropout=0.1):
-        super().__init__()
-
-        hidden_dim = hidden_dim or 4 * student_dim  # widened FFN
-
-        # project teacher to student space if needed
-        self.teacher_proj = nn.Linear(
-            teacher_dim, student_dim) if teacher_dim != student_dim else nn.Identity()
-
-        # multihead attention (student queries teacher)
-        self.attn = nn.MultiheadAttention(
-            embed_dim=student_dim, num_heads=num_heads, dropout=dropout, batch_first=True)
-
-        # feed-forward network (SwiGLU)
-        self.ffn = nn.Sequential(
-            SwiGLU(student_dim, hidden_dim),
-            nn.Dropout(dropout)
-        )
-
-        # normalization
-        self.norm1 = RMSNorm(student_dim)
-        self.norm2 = RMSNorm(student_dim)
-
-        # gating for residuals
-        self.gate_attn = nn.Parameter(torch.tensor(0.1))  # start small
-        self.gate_ffn = nn.Parameter(torch.tensor(0.1))
-
-    def forward(self, student_tokens, teacher_tokens):
-        # project teacher
-        teacher_tokens = self.teacher_proj(teacher_tokens)
-
-        # cross-attention: student queries teacher
-        attn_out, _ = self.attn(
-            query=self.norm1(student_tokens),
-            key=teacher_tokens,
-            value=teacher_tokens
-        )
-
-        student_tokens = student_tokens + self.gate_attn * attn_out
-
-        # feed-forward refinement
-        ffn_out = self.ffn(self.norm2(student_tokens))
-        student_tokens = student_tokens + self.gate_ffn * ffn_out
-
-        return student_tokens
-
-
-class StudentTeacherRefiner(nn.Module):
-    def __init__(self, dim, out_channels, input_resolution, patch_size, output_shape):
-        super().__init__()
-
-        self.dim = dim
-        self.out_channels = out_channels
-        self.input_resolution = input_resolution
-        self.output_shape = output_shape
-
-        # Define refiners for student-teacher pairs
-        self.refine2 = CrossAttentionRefiner(
-            student_dim=128, teacher_dim=128, num_heads=4)
-        self.refine1 = CrossAttentionRefiner(
-            student_dim=64, teacher_dim=128, num_heads=4)
-        self.refine0 = CrossAttentionRefiner(
-            student_dim=32, teacher_dim=128, num_heads=4)
-
-        self._out_proj0 = PatchUnembedConv(embed_dim=dim[0],
-                                           out_ch=out_channels[0],
-                                           patch_size=patch_size[0],
-                                           Hp=input_resolution[0][0], Wp=input_resolution[0][0])
-
-        self._out_proj1 = PatchUnembedConv(embed_dim=dim[1],
-                                           out_ch=out_channels[1],
-                                           patch_size=patch_size[1],
-                                           Hp=input_resolution[1][0], Wp=input_resolution[1][0])
-
-        self._out_proj2 = PatchUnembedConv(embed_dim=dim[2],
-                                           out_ch=out_channels[2],
-                                           patch_size=patch_size[2],
-                                           Hp=input_resolution[2][0], Wp=input_resolution[2][0])
-
-    def forward(self, student_feats, teacher_feats):
-        # student_feats: (fusion0, fusion1, fusion2)
-        # teacher_feats: (fusion2, fusion3, fusion4)
-        s0, s1, s2 = student_feats
-        t2, t3, t4 = teacher_feats
-
-        # refine progressively
-        s2_refined = self.refine2(s2, t2)   # same resolution tokens
-        s1_refined = self.refine1(s1, t3)   # cross-scale guidance
-        s0_refined = self.refine0(s0, t4)
-
-        # s0_refined = self._out_proj0(
-        #     s0_refined.permute(1, 0, 2), self.output_shape[0])
-        # s1_refined = self._out_proj1(
-        #     s1_refined.permute(1, 0, 2), self.output_shape[1])
-        # s2_refined = self._out_proj2(
-        #     s2_refined.permute(1, 0, 2), self.output_shape[2])
-
-        return s0_refined, s1_refined, s2_refined
-
-
-class RefineSwin(nn.Module):
-    def __init__(self):
-        super(RefineSwin, self).__init__()
-        self.mode = 'bilinear'
-        self.align_corners = True
-
-    def forward(self, attention, x1, x2, x3):
-        # interpolate to match spatial sizes (broadcast will handle channels)
-        att1 = F.interpolate(
-            attention, size=x1.shape[2:], mode=self.mode, align_corners=self.align_corners)
-        att2 = F.interpolate(
-            attention, size=x2.shape[2:], mode=self.mode, align_corners=self.align_corners)
-        att3 = F.interpolate(
-            attention, size=x3.shape[2:], mode=self.mode, align_corners=self.align_corners)
-
-        # refinement: f' = f + f * S  (attention S is single-channel, broadcast across C)
-        x1 = x1 + x1 * att1
-        x2 = x2 + x2 * att2
-        x3 = x3 + x3 * att3
-
-        return x1, x2, x3
+        # Final residual connection with original input
+        return f + Ri
 
 
 # ==================================================================
-
 
 class BaseModel(nn.Module):
     def __init__(self, channel=32):
@@ -939,98 +849,56 @@ class BBSNetTransformerAttention(BaseModel):
     def __init__(self):
         super().__init__()
 
-        dropout = 0.1
+        dropout = 0.2
 
         heads_stage = (4, 4, 8, 8, 8)
-        embed_dim = (32, 64, 128, 128, 128)  # embed_dim for each stage
-        C = [64, 256, 512, 1024, 2048]           # channel dims from ResNet
+        # Increased early embed_dims for better representation
+        embed_stage = (64, 64, 128, 128, 128)
+        C = [64, 256, 512, 1024, 2048]
         S = [96, 96, 48, 24, 12]
-        P = [8, 8, 4, 2, 1]
 
-        # Replace FusionBlock2D with RGBDViTBlock
+        # More appropriate patch sizes for each stage
+        patch_size = [4, 4, 2, 1, 1]  # Smaller patches for early layers
+
+        # Window sizes for efficient attention (None for global attention)
+        # Local attention for early layers, global for later
+        window_sizes = [8, 8, 8, None, None]
+
+        # Whether to use overlapping patches
+        # Overlap for early layers
+        use_overlap = [True, True, False, False, False]
+
+        # Replace FusionBlock2D with improved RGBDViTBlock
         self.fuse0 = RGBDViTBlock(
-            in_ch_r=C[0], in_ch_t=C[0],
-            embed_dim=embed_dim[0], num_heads=heads_stage[0],
-            patch_size=P[0], dropout=dropout, attn_dropout=dropout
+            in_ch_r=C[0], in_ch_t=C[0], shape=S[0],
+            embed_dim=embed_stage[0], num_heads=heads_stage[0],
+            patch_size=patch_size[0], dropout=dropout, attn_dropout=dropout,
+            window_size=window_sizes[0], use_overlap=use_overlap[0]
         )
         self.fuse1 = RGBDViTBlock(
-            in_ch_r=C[1], in_ch_t=C[1],
-            embed_dim=embed_dim[1], num_heads=heads_stage[1],
-            patch_size=P[1], dropout=dropout, attn_dropout=dropout
+            in_ch_r=C[1], in_ch_t=C[1], shape=S[1],
+            embed_dim=embed_stage[1], num_heads=heads_stage[1],
+            patch_size=patch_size[1], dropout=dropout, attn_dropout=dropout,
+            window_size=window_sizes[1], use_overlap=use_overlap[1]
         )
         self.fuse2 = RGBDViTBlock(
-            in_ch_r=C[2], in_ch_t=C[2],
-            embed_dim=embed_dim[2], num_heads=heads_stage[2],
-            patch_size=P[2], dropout=dropout, attn_dropout=dropout
+            in_ch_r=C[2], in_ch_t=C[2], shape=S[2],
+            embed_dim=embed_stage[2], num_heads=heads_stage[2],
+            patch_size=patch_size[2], dropout=dropout, attn_dropout=dropout,
+            window_size=window_sizes[2], use_overlap=use_overlap[2]
         )
         self.fuse3_1 = RGBDViTBlock(
-            in_ch_r=C[3], in_ch_t=C[3],
-            embed_dim=embed_dim[3], num_heads=heads_stage[3],
-            patch_size=P[3], dropout=dropout, attn_dropout=dropout
+            in_ch_r=C[3], in_ch_t=C[3], shape=S[3],
+            embed_dim=embed_stage[3], num_heads=heads_stage[3],
+            patch_size=patch_size[3], dropout=dropout, attn_dropout=dropout,
+            window_size=window_sizes[3], use_overlap=use_overlap[3]
         )
         self.fuse4_1 = RGBDViTBlock(
-            in_ch_r=C[4], in_ch_t=C[4],
-            embed_dim=embed_dim[4], num_heads=heads_stage[4],
-            patch_size=P[4], dropout=dropout, attn_dropout=dropout
+            in_ch_r=C[4], in_ch_t=C[4], shape=S[4],
+            embed_dim=embed_stage[4], num_heads=heads_stage[4],
+            patch_size=patch_size[4], dropout=dropout, attn_dropout=dropout,
+            window_size=window_sizes[4], use_overlap=use_overlap[4]
         )
-
-        W = [12, 12, 12, 12, 12]
-        self.rfb2_1 = TransformerGCM(
-            dim=embed_dim[2], input_resolution=(S[2]//P[2], S[2]//P[2]), window_size=W[2],
-            depth=1, out_channels=32, patch_size=P[2], output_shape=(S[2], S[2])
-        )
-
-        self.rfb3_1 = TransformerGCM(
-            dim=embed_dim[3], input_resolution=(S[3]//P[3], S[3]//P[3]), window_size=W[3],
-            depth=1, out_channels=32, patch_size=P[3], output_shape=(S[3], S[3])
-        )
-
-        self.rfb4_1 = TransformerGCM(
-            dim=embed_dim[4], input_resolution=(S[4]//P[4], S[4]//P[4]), window_size=W[4],
-            depth=1, out_channels=32, patch_size=P[4], output_shape=(S[4], S[4])
-        )
-
-        self.rfb0_2 = TransformerGCM(
-            dim=embed_dim[0], input_resolution=(S[0]//P[0], S[0]//P[0]), window_size=W[0],
-            depth=2, out_channels=32, patch_size=P[0], output_shape=(S[0], S[0])
-        )
-
-        self.rfb1_2 = TransformerGCM(
-            dim=embed_dim[1], input_resolution=(S[1]//P[1], S[1]//P[1]), window_size=W[1],
-            depth=2, out_channels=32, patch_size=P[1], output_shape=(S[1], S[1])
-        )
-
-        self.rfb5_2 = TransformerGCM(
-            dim=embed_dim[2], input_resolution=(S[2]//P[2], S[2]//P[2]), window_size=W[2],
-            depth=2, out_channels=32, patch_size=P[2], output_shape=(S[2], S[2])
-        )
-
-        # input shape: [64, 96, 96] = [C1, H, W]
-        # fusion0: [H/P0 * H/P0, E0] = [576, 32]
-        # fusion1: [H/P1 * H/P1, E1] = [576, 64]
-        # fusion2: [(H/2)/P2 * (H/2)/P2, E2] = [576, 128]
-        # fusion3: [(H/4)/P3 * (H/4)/P3, E3] = [144, 128]
-        # fusion4: [(H/8)/P4 * (H/8)/P4, E4] = [144, 128]
-
-        self.agg2 = aggregation_final_swin(32)
-
-        # dim, out_channels, input_resolution, patch_size, output_shape
-        dim = [embed_dim[0], embed_dim[1], embed_dim[2]]
-        out_channels = [128, 256, 512]
-        input_resolution = [(S[0]//P[0], S[0]//P[0]),
-                            (S[1]//P[1], S[1]//P[1]), (S[2]//P[2], S[2]//P[2])]
-        patch_size = [P[0], P[1], P[2]]
-        output_shape = [(S[0], S[0]), (S[1], S[1]), (S[2], S[2])]
-
-        self.refiner = StudentTeacherRefiner(
-            dim=dim, out_channels=out_channels, input_resolution=input_resolution,
-            patch_size=patch_size, output_shape=output_shape
-        )
-
-        # self.rfb0_2 = GCM(128, 32)
-
-        self.HA = RefineSwin()
-
         if self.training:
             self.initialize_weights()
 
@@ -1039,84 +907,66 @@ class BBSNetTransformerAttention(BaseModel):
         x = self.resnet.conv1(x)
         x = self.resnet.bn1(x)
         x = self.resnet.relu(x)
-        x = self.resnet.maxpool(x)  # [2, 64, 96, 96]
+        x = self.resnet.maxpool(x)
 
         x_depth = self.resnet_depth.conv1(x_depth)
         x_depth = self.resnet_depth.bn1(x_depth)
         x_depth = self.resnet_depth.relu(x_depth)
-        x_depth = self.resnet_depth.maxpool(x_depth)  # [2, 64, 96, 96]
+        x_depth = self.resnet_depth.maxpool(x_depth)
 
         # ---- layer0 fusion (64ch) ----
-        # [2, 64, 96, 96], [2, 576, 32]
-        x, fused_tokens0 = self.fuse0(x, x_depth)
+        x = self.fuse0(x, x_depth)
 
         # layer1
-        x1 = self.resnet.layer1(x)  # [2, 256, 96, 96]
-        x1_depth = self.resnet_depth.layer1(x_depth)  # [2, 256, 96, 96]
+        x1 = self.resnet.layer1(x)
+        x1_depth = self.resnet_depth.layer1(x_depth)
 
         # ---- layer1 fusion (256ch) ----
-        # [2, 256, 96, 96], [2, 576, 64]
-        x1, fused_tokens1 = self.fuse1(x1, x1_depth)
+        x1 = self.fuse1(x1, x1_depth)
 
         # layer2
-        x2 = self.resnet.layer2(x1)  # [2, 512, 48, 48]
-        x2_depth = self.resnet_depth.layer2(x1_depth)  # [2, 512, 48, 48]
+        x2 = self.resnet.layer2(x1)
+        x2_depth = self.resnet_depth.layer2(x1_depth)
 
         # ---- layer2 fusion (512ch) ----
-        # [2, 512, 48, 48], [2, 576, 128]
-        x2, fused_tokens2 = self.fuse2(x2, x2_depth)
+        x2 = self.fuse2(x2, x2_depth)
 
         # layer3_1
-        x3_1 = self.resnet.layer3_1(x2)  # [2, 1024, 24, 24]
-        x3_1_depth = self.resnet_depth.layer3_1(x2_depth)  # [2, 1024, 24, 24]
+        x3_1 = self.resnet.layer3_1(x2)
+        x3_1_depth = self.resnet_depth.layer3_1(x2_depth)
 
         # ---- layer3_1 fusion (1024ch) ----
-        x3_1, fused_tokens3 = self.fuse3_1(
-            x3_1, x3_1_depth)  # [2, 1024, 24, 24], [2, 144, 128]
+        x3_1 = self.fuse3_1(x3_1, x3_1_depth)
 
         # layer4_1
-        x4_1 = self.resnet.layer4_1(x3_1)  # [2, 2048, 12, 12]
-        x4_1_depth = self.resnet_depth.layer4_1(
-            x3_1_depth)  # [2, 2048, 12, 12]
+        x4_1 = self.resnet.layer4_1(x3_1)
+        x4_1_depth = self.resnet_depth.layer4_1(x3_1_depth)
 
         # ---- layer4_1 fusion (2048ch) ----
-        x4_1, fused_tokens4 = self.fuse4_1(
-            x4_1, x4_1_depth)  # [2, 2048, 12, 12], [2, 144, 128]
-
-        # ====================================================================
+        x4_1 = self.fuse4_1(x4_1, x4_1_depth)
 
         # produce initial saliency map by decoder1
-        fused_tokens2, x2_1 = self.rfb2_1(fused_tokens2)  # → [1, 32, 48, 48]
-        fused_tokens3, x3_1 = self.rfb3_1(fused_tokens3)  # → [1, 32, 48, 48]
-        fused_tokens4, x4_1 = self.rfb4_1(fused_tokens4)  # → [1, 32, 12, 12]
+        x2_1 = self.rfb2_1(x2)
+        x3_1 = self.rfb3_1(x3_1)
+        x4_1 = self.rfb4_1(x4_1)
 
         attention_map = self.agg1(x4_1, x3_1, x2_1)
 
         # Refine low-layer features by initial map
-        # x, x1, x5 = self.HA(attention_map.sigmoid(), x, x1, x2)
-
-        x, x1, x5 = self.refiner(
-            student_feats=(fused_tokens0, fused_tokens1, fused_tokens2),
-            teacher_feats=(fused_tokens2, fused_tokens3, fused_tokens4)
-        )
+        x, x1, x5 = self.HA(attention_map.sigmoid(), x, x1, x2)
 
         # produce final saliency map by decoder2
-        _, x0_2 = self.rfb0_2(x)  # [2, 32, 96, 96]
-        _, x1_2 = self.rfb1_2(x1)  # [2, 32, 96, 96]
-        _, x5_2 = self.rfb5_2(x5)  # [2, 32, 48, 48]
-        # x0_2 = self.rfb0_2(x)
-        # x1_2 = self.rfb1_2(x1)
-        # x5_2 = self.rfb5_2(x5)
+        x0_2 = self.rfb0_2(x)
+        x1_2 = self.rfb1_2(x1)
+        x5_2 = self.rfb5_2(x5)
 
-        y = self.agg2(x5_2, x1_2, x0_2)  # [2, 32, 96, 96]
+        y = self.agg2(x5_2, x1_2, x0_2)
 
         # PTM module
-        y = self.agant1(y)  # [1, 64, 88, 88]
-        y = self.deconv1(y)  # [1, 64, 176, 176]
-        y = self.agant2(y)  # [1, 32, 176, 176]
-        y = self.deconv2(y)  # [1, 32, 352, 352]
-        y = self.out2_conv(y)  # [1, 1, 352, 352]
+        y = self.agant1(y)
+        y = self.deconv1(y)
+        y = self.agant2(y)
+        y = self.deconv2(y)
+        y = self.out2_conv(y)
 
-        s1 = F.interpolate(
-            attention_map, size=y.shape[2:], mode='bilinear', align_corners=True)
-        return s1, y
+        return self.upsample(attention_map), y

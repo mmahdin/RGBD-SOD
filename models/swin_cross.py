@@ -388,7 +388,7 @@ class BasicLayer(nn.Module):
 
     def __init__(self, dim, input_resolution, depth, num_heads, window_size,
                  mlp_ratio=4., qkv_bias=True, qk_scale=None, drop=0., attn_drop=0.,
-                 drop_path=0., norm_layer=nn.LayerNorm, downsample=None, use_checkpoint=False):
+                 drop_path=0., norm_layer=nn.LayerNorm, downsample=None, use_checkpoint=False, cross_attention=False):
 
         super().__init__()
         self.dim = dim
@@ -407,7 +407,7 @@ class BasicLayer(nn.Module):
                                  drop=drop, attn_drop=attn_drop,
                                  drop_path=drop_path[i] if isinstance(
                                      drop_path, list) else drop_path,
-                                 norm_layer=norm_layer)
+                                 norm_layer=norm_layer, cross_attention=cross_attention)
             for i in range(depth)])
 
         # patch merging layer
@@ -417,14 +417,14 @@ class BasicLayer(nn.Module):
         else:
             self.downsample = None
 
-    def forward(self, x):
+    def forward(self, x, y=None):
         # x: [1, 9216, 128]
 
         for blk in self.blocks:
             if self.use_checkpoint:
                 x = checkpoint.checkpoint(blk, x)
             else:
-                x = blk(x)  # [1, 9216, 128]
+                x = blk(x, y)  # [1, 9216, 128]
         if self.downsample is not None:
             x = self.downsample(x)  # [1, 2304, 256]
         return x
