@@ -4,7 +4,7 @@ import sys
 parser = argparse.ArgumentParser()
 parser.add_argument('--epoch', type=int, default=2, help='epoch number')
 parser.add_argument('--lr', type=float, default=1e-4, help='learning rate')
-parser.add_argument('--batchsize', type=int, default=2,
+parser.add_argument('--batchsize', type=int, default=1,
                     help='training batch size')
 parser.add_argument('--trainsize', type=int, default=352,
                     help='training dataset size')

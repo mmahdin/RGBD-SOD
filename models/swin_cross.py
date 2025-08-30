@@ -1,3 +1,4 @@
+import numpy as np
 from torch import nn
 import torch
 import torch.utils.checkpoint as checkpoint
@@ -198,6 +199,55 @@ class WindowAttention(nn.Module):
         flops += self.num_heads * N * N * (self.dim // self.num_heads)
         # x = self.proj(x)
         flops += N * self.dim * self.dim
+        return flops
+
+
+class PatchMerging(nn.Module):
+    r""" Patch Merging Layer.
+
+    Args:
+        input_resolution (tuple[int]): Resolution of input feature.
+        dim (int): Number of input channels.
+        norm_layer (nn.Module, optional): Normalization layer.  Default: nn.LayerNorm
+    """
+
+    def __init__(self, input_resolution, dim, norm_layer=nn.LayerNorm):
+        super().__init__()
+        self.input_resolution = input_resolution
+        self.dim = dim
+        self.reduction = nn.Linear(4 * dim, 2 * dim, bias=False)
+        self.norm = norm_layer(4 * dim)
+
+    def forward(self, x):
+        """
+        x: B, H*W, C
+        """
+        H, W = self.input_resolution
+        B, L, C = x.shape
+        assert L == H * W, "input feature has wrong size"
+        assert H % 2 == 0 and W % 2 == 0, f"x size ({H}*{W}) are not even."
+
+        x = x.view(B, H, W, C)
+
+        x0 = x[:, 0::2, 0::2, :]  # B H/2 W/2 C
+        x1 = x[:, 1::2, 0::2, :]  # B H/2 W/2 C
+        x2 = x[:, 0::2, 1::2, :]  # B H/2 W/2 C
+        x3 = x[:, 1::2, 1::2, :]  # B H/2 W/2 C
+        x = torch.cat([x0, x1, x2, x3], -1)  # B H/2 W/2 4*C
+        x = x.view(B, -1, 4 * C)  # B H/2*W/2 4*C
+
+        x = self.norm(x)
+        x = self.reduction(x)
+
+        return x
+
+    def extra_repr(self) -> str:
+        return f"input_resolution={self.input_resolution}, dim={self.dim}"
+
+    def flops(self):
+        H, W = self.input_resolution
+        flops = H * W * self.dim
+        flops += (H // 2) * (W // 2) * 4 * self.dim * 2 * self.dim
         return flops
 
 
@@ -438,4 +488,211 @@ class BasicLayer(nn.Module):
             flops += blk.flops()
         if self.downsample is not None:
             flops += self.downsample.flops()
+        return flops
+
+
+class PatchEmbed(nn.Module):
+
+    def __init__(self, img_size=224, patch_size=4, in_chans=3, embed_dim=96, norm_layer=None):
+        super().__init__()
+        img_size = to_2tuple(img_size)
+        patch_size = to_2tuple(patch_size)
+        patches_resolution = [img_size[0] //
+                              patch_size[0], img_size[1] // patch_size[1]]
+        self.img_size = img_size
+        self.patch_size = patch_size
+        self.patches_resolution = patches_resolution
+        self.num_patches = patches_resolution[0] * patches_resolution[1]
+
+        self.in_chans = in_chans  # define in_chans == 3
+        self.embed_dim = embed_dim  # Swin-B.embed_dim ==128,(T is 96)
+
+        self.proj = nn.Conv2d(
+            in_chans, embed_dim, kernel_size=patch_size, stride=patch_size)  # dim 3->128
+        if norm_layer is not None:
+            self.norm = norm_layer(embed_dim)
+        else:
+            self.norm = None
+
+    def forward(self, x):
+        B, C, H, W = x.shape
+        # FIXME look at relaxing size constraints,尺寸固定，下有断言
+        assert H == self.img_size[0] and W == self.img_size[1], \
+            f"Input image size ({H}*{W}) doesn't match model ({self.img_size[0]}*{self.img_size[1]})."
+
+        x = self.proj(x).flatten(2).transpose(1, 2)  # B Ph*Pw C
+        if self.norm is not None:
+            x = self.norm(x)
+        return x
+
+    def flops(self):
+        Ho, Wo = self.patches_resolution
+        flops = Ho * Wo * self.embed_dim * self.in_chans * \
+            (self.patch_size[0] * self.patch_size[1])
+        if self.norm is not None:
+            flops += Ho * Wo * self.embed_dim
+        return flops
+
+
+class SwinTransformer(nn.Module):
+    r""" Swin Transformer
+        A PyTorch impl of : `Swin Transformer: Hierarchical Vision Transformer using Shifted Windows`  -
+          https://arxiv.org/pdf/2103.14030
+
+    Args:
+        img_size (int | tuple(int)): Input image size. Default 224
+        patch_size (int | tuple(int)): Patch size. Default: 4
+        in_chans (int): Number of input image channels. Default: 3
+        num_classes (int): Number of classes for classification head. Default: 1000
+        embed_dim (int): Patch embedding dimension. Default: 96
+        depths (tuple(int)): Depth of each Swin Transformer layer.
+        num_heads (tuple(int)): Number of attention heads in different layers.
+        window_size (int): Window size. Default: 7
+        mlp_ratio (float): Ratio of mlp hidden dim to embedding dim. Default: 4
+        qkv_bias (bool): If True, add a learnable bias to query, key, value. Default: True
+        qk_scale (float): Override default qk scale of head_dim ** -0.5 if set. Default: None
+        drop_rate (float): Dropout rate. Default: 0
+        attn_drop_rate (float): Attention dropout rate. Default: 0
+        drop_path_rate (float): Stochastic depth rate. Default: 0.1
+        norm_layer (nn.Module): Normalization layer. Default: nn.LayerNorm.
+        ape (bool): If True, add absolute position embedding to the patch embedding. Default: False
+        patch_norm (bool): If True, add normalization after patch embedding. Default: True
+        use_checkpoint (bool): Whether to use checkpointing to save memory. Default: False
+    """
+
+    def __init__(self, img_size=384, patch_size=4, in_chans=3, num_classes=1000,
+                 embed_dim=128, depths=[2, 2, 6, 2], num_heads=[3, 6, 12, 24],
+                 window_size=12, mlp_ratio=4., qkv_bias=True, qk_scale=None,
+                 drop_rate=0., attn_drop_rate=0., drop_path_rate=0.1,
+                 norm_layer=nn.LayerNorm, ape=False, patch_norm=True,
+                 use_checkpoint=False, cross_attention=False, **kwargs):
+        super().__init__()
+
+        self.cross_attention = cross_attention
+        self.num_classes = num_classes
+        self.num_layers = len(depths)
+        self.embed_dim = embed_dim
+        self.ape = ape
+        self.patch_norm = patch_norm
+        self.num_features = int(embed_dim * 2 ** (self.num_layers - 1))
+        self.mlp_ratio = mlp_ratio
+
+        self.patch_embed = PatchEmbed(
+            img_size=img_size, patch_size=patch_size, in_chans=in_chans, embed_dim=embed_dim,
+            norm_layer=norm_layer if self.patch_norm else None)
+        num_patches = self.patch_embed.num_patches
+        patches_resolution = self.patch_embed.patches_resolution
+        self.patches_resolution = patches_resolution
+
+        if self.ape:
+            self.absolute_pos_embed = nn.Parameter(
+                torch.zeros(1, num_patches, embed_dim))
+            trunc_normal_(self.absolute_pos_embed, std=.02)
+
+        self.pos_drop = nn.Dropout(p=drop_rate)
+
+        dpr = [x.item() for x in torch.linspace(0, drop_path_rate,
+                                                # stochastic depth decay rule
+                                                sum(depths))]
+
+        # build layers
+        self.layers = nn.ModuleList()
+        for i_layer in range(self.num_layers):
+            layer = BasicLayer(
+                dim=int(embed_dim * 2 ** i_layer),
+                input_resolution=(patches_resolution[0] // (2 ** i_layer),
+                                  patches_resolution[1] // (2 ** i_layer)),
+                depth=depths[i_layer],
+                num_heads=num_heads[i_layer],
+                window_size=window_size,
+                mlp_ratio=self.mlp_ratio,
+                qkv_bias=qkv_bias, qk_scale=qk_scale,
+                drop=drop_rate, attn_drop=attn_drop_rate,
+                drop_path=dpr[sum(depths[:i_layer]):sum(depths[:i_layer + 1])],
+                norm_layer=norm_layer,
+                downsample=PatchMerging if (
+                    i_layer < self.num_layers - 1) else None,
+                use_checkpoint=use_checkpoint,
+                cross_attention=cross_attention  # Pass cross_attention to BasicLayer
+            )
+            self.layers.append(layer)
+
+        self.norm = norm_layer(self.num_features)
+        self.apply(self._init_weights)
+
+    def _init_weights(self, m):
+        if isinstance(m, nn.Linear):
+            trunc_normal_(m.weight, std=.02)
+            if isinstance(m, nn.Linear) and m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+        elif isinstance(m, nn.LayerNorm):
+            nn.init.constant_(m.bias, 0)
+            nn.init.constant_(m.weight, 1.0)
+
+    @torch.jit.ignore
+    def no_weight_decay(self):
+        return {'absolute_pos_embed'}
+
+    @torch.jit.ignore
+    def no_weight_decay_keywords(self):
+        return {'relative_position_bias_table'}
+
+    def forward_features(self, x, y=None):
+        # Process main input x
+        x = self.patch_embed(x)
+
+        if self.ape:
+            x = x + self.absolute_pos_embed
+        x = self.pos_drop(x)
+
+        # Process second input y if provided for cross-attention
+        if y is not None and self.cross_attention:
+            y = self.patch_embed(y)
+            if self.ape:
+                y = y + self.absolute_pos_embed
+            y = self.pos_drop(y)
+
+        layer_features = []
+        B, L, C = x.shape
+
+        # Store initial features
+        layer_features.append(x.view(B, int(np.sqrt(L)), int(
+            np.sqrt(L)), -1).permute(0, 3, 1, 2).contiguous())
+
+        # Process through layers
+        for layer in self.layers:
+            if y is not None and self.cross_attention:
+                x = layer(x, y)  # Pass both inputs for cross-attention
+            else:
+                x = layer(x)  # Self-attention only
+
+            B, L, C = x.shape
+            xl = x.view(B, int(np.sqrt(L)), int(np.sqrt(L)), -
+                        1).permute(0, 3, 1, 2).contiguous()
+            layer_features.append(xl)
+
+        x = self.norm(x)
+        B, L, C = x.shape
+        x = x.view(B, int(np.sqrt(L)), int(np.sqrt(L)), -
+                   1).permute(0, 3, 1, 2).contiguous()
+
+        return x
+
+    def forward(self, x, y=None):
+        if y is not None and not self.cross_attention:
+            raise ValueError(
+                "Second input provided but cross_attention is not enabled")
+
+        outs = self.forward_features(x, y)
+        return outs
+
+    def flops(self):
+        flops = 0
+        flops += self.patch_embed.flops()
+        for i, layer in enumerate(self.layers):
+            flops += layer.flops()
+        flops += self.num_features * \
+            self.patches_resolution[0] * \
+            self.patches_resolution[1] // (2 ** self.num_layers)
+        flops += self.num_features * self.num_classes
         return flops
