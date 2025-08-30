@@ -5,6 +5,7 @@ from models.ResNet import ResNet50
 from torch.nn import functional as F
 from typing import Tuple
 from models.res2net_v1b_base import Res2Net_model
+from models.swin_cross import BasicLayer
 
 
 def conv3x3(in_planes, out_planes, stride=1):
@@ -466,7 +467,71 @@ class RGBDViTBlock(nn.Module):
         return f
 
 
+class Fusion(nn.Module):
+    def __init__(self, in_ch, embed_dim, shape, swin_depth,
+                 num_heads, window_size, mlp_ratio=4,
+                 attn_dropout=0.1
+                 ):
+        super(Fusion, self).__init__()
+
+        self.channel_reduction_rgb = BasicConv2d(in_ch, embed_dim, 1)
+        self.channel_reduction_dep = BasicConv2d(in_ch, embed_dim, 1)
+
+        # Self-attention for each modality
+        self.rgb_self_attn = BasicLayer(
+            dim=embed_dim, input_resolution=(shape, shape),
+            depth=swin_depth, num_heads=num_heads, window_size=window_size,
+            mlp_ratio=mlp_ratio, attn_drop=attn_dropout
+        )
+        # self.dep_self_attn = BasicLayer(
+        #     dim=embed_dim, input_resolution=shape,
+        #     depth=swin_depth, num_heads=num_heads, window_size=window_size,
+        #     mlp_ratio=mlp_ratio, attn_drop=attn_dropout
+        # )
+
+        # Cross-attention: rgb queries, depth keys/vals and vice versa
+        self.rgb_cross_attn = BasicLayer(
+            dim=embed_dim, input_resolution=(shape, shape),
+            depth=swin_depth, num_heads=num_heads, window_size=window_size,
+            mlp_ratio=mlp_ratio, attn_drop=attn_dropout, cross_attention=True
+        )
+        # self.dep_cross_attn = BasicLayer(
+        #     dim=embed_dim, input_resolution=shape,
+        #     depth=swin_depth, num_heads=num_heads, window_size=window_size,
+        #     mlp_ratio=mlp_ratio, attn_drop=attn_dropout, cross_attention=True
+        # )
+
+    def forward(self, Ri: torch.Tensor, Ti: torch.Tensor):
+        """
+        Ri: (B, C_r, H, W)
+        Ti: (B, C_t, H, W)
+        returns: Fr, Ft same shapes as Ri and Ti
+        """
+        Ri = self.channel_reduction_rgb(Ri)
+        Ti = self.channel_reduction_dep(Ti)
+
+        B, Cr, H, W = Ri.shape
+        B2, Ct, H2, W2 = Ti.shape
+        assert B == B2 and H == H2 and W == W2, "Inputs must have same batch and spatial dims"
+
+        rgb_tokens = Ri.flatten(2).transpose(1, 2)  # (B, H*W, C)
+        dep_tokens = Ti.flatten(2).transpose(1, 2)
+
+        # Self-attention
+        rgb_self = self.rgb_self_attn(rgb_tokens)
+        # dep_self = self.dep_self_attn(dep_tokens)
+
+        # Cross-attention
+        rgb_cross = self.rgb_cross_attn(rgb_tokens, dep_tokens)
+        # dep_cross = self.dep_cross_attn(dep_tokens, rgb_tokens)
+
+        fused = rgb_self + rgb_cross + rgb_tokens
+
+        fused = fused.transpose(1, 2).view((B, Cr, H, W))
+        return fused
+
 # ==================================================================
+
 
 class BaseModel(nn.Module):
     def __init__(self, channel=32):
@@ -692,58 +757,44 @@ class BBSNetTransformerAttention(BaseModel):
 
         dropout = 0.1
 
+        embed_dim = [64, 128, 256, 512, 1024]
         heads_stage = (4, 4, 8, 8, 8)
-        embed_stage = (32, 64, 128, 128, 128)  # embed_dim for each stage
         C = [64, 256, 512, 1024, 2048]           # channel dims from ResNet
+        S = [88, 88, 44, 22, 11]
 
         # you can also set per stage (smaller patch for early layers)
-        patch_size = [8, 8, 4, 2, 1]
+        W = [8, 8, 11, 11, 11]
 
         self.layer_rgb = Res2Net_model(50)
         self.layer_dep = Res2Net_model(50)
         self.layer_dep0 = nn.Conv2d(1, 3, kernel_size=1)
 
         # Replace FusionBlock2D with RGBDViTBlock
-        self.fuse0 = RGBDViTBlock(
-            in_ch_r=C[0], in_ch_t=C[0],
-            embed_dim=embed_stage[0], num_heads=heads_stage[0],
-            patch_size=patch_size[0], dropout=dropout, attn_dropout=dropout
+        self.fuse0 = Fusion(
+            in_ch=C[0], embed_dim=embed_dim[0], shape=S[0], swin_depth=2, num_heads=heads_stage[0], window_size=W[0]
         )
-        self.fuse1 = RGBDViTBlock(
-            in_ch_r=C[1], in_ch_t=C[1],
-            embed_dim=embed_stage[1], num_heads=heads_stage[1],
-            patch_size=patch_size[1], dropout=dropout, attn_dropout=dropout
+        self.fuse1 = Fusion(
+            in_ch=C[1], embed_dim=embed_dim[1], shape=S[1], swin_depth=2, num_heads=heads_stage[1], window_size=W[1]
         )
-        self.fuse2 = RGBDViTBlock(
-            in_ch_r=C[2], in_ch_t=C[2],
-            embed_dim=embed_stage[2], num_heads=heads_stage[2],
-            patch_size=patch_size[2], dropout=dropout, attn_dropout=dropout
+        self.fuse2 = Fusion(
+            in_ch=C[2], embed_dim=embed_dim[2], shape=S[2], swin_depth=2, num_heads=heads_stage[2], window_size=W[2]
         )
-        self.fuse3_1 = RGBDViTBlock(
-            in_ch_r=C[3], in_ch_t=C[3],
-            embed_dim=embed_stage[3], num_heads=heads_stage[3],
-            patch_size=patch_size[3], dropout=dropout, attn_dropout=dropout
+        self.fuse3_1 = Fusion(
+            in_ch=C[3], embed_dim=embed_dim[3], shape=S[3], swin_depth=2, num_heads=heads_stage[3], window_size=W[3]
         )
-        self.fuse4_1 = RGBDViTBlock(
-            in_ch_r=C[4], in_ch_t=C[4],
-            embed_dim=embed_stage[4], num_heads=heads_stage[4],
-            patch_size=patch_size[4], dropout=dropout, attn_dropout=dropout
+        self.fuse4_1 = Fusion(
+            in_ch=C[4], embed_dim=embed_dim[4], shape=S[4], swin_depth=2, num_heads=heads_stage[4], window_size=W[4]
         )
 
         channel = 32
-        self.ful_gcm_4 = GCM(2048,  channel)
-        self.ful_gcm_3 = GCM(1024+channel,  channel)
-        self.ful_gcm_2 = GCM(512+channel,  channel)
-        self.ful_gcm_1 = GCM(256+channel,  channel)
-        self.ful_gcm_0 = GCM(64+channel,  channel)
-        self.ful_conv_out = nn.Conv2d(channel, 1, 1)
+        self.rfb2_1 = GCM(embed_dim[2], channel)
+        self.rfb3_1 = GCM(embed_dim[3], channel)
+        self.rfb4_1 = GCM(embed_dim[4], channel)
 
-        self.upsample_2 = nn.Upsample(
-            scale_factor=2, mode='bilinear', align_corners=True)
-        self.upsample_4 = nn.Upsample(
-            scale_factor=4, mode='bilinear', align_corners=True)
-        self.upsample_8 = nn.Upsample(
-            scale_factor=8, mode='bilinear', align_corners=True)
+        # Decoder 2
+        self.rfb0_2 = GCM(embed_dim[0], channel)
+        self.rfb1_2 = GCM(embed_dim[1], channel)
+        self.rfb5_2 = GCM(embed_dim[2], channel)
 
         if self.training:
             self.initialize_weights()
@@ -762,19 +813,28 @@ class BBSNetTransformerAttention(BaseModel):
 
         # =======================================================
 
-        x_ful_42 = self.ful_gcm_4(x4_1)
+        # produce initial saliency map by decoder1
+        x2_1 = self.rfb2_1(x2)
+        x3_1 = self.rfb3_1(x3_1)
+        x4_1 = self.rfb4_1(x4_1)
 
-        x_ful_3_cat = torch.cat([x3_1, self.upsample_2(x_ful_42)], dim=1)
-        x_ful_32 = self.ful_gcm_3(x_ful_3_cat)
+        attention_map = self.agg1(x4_1, x3_1, x2_1)
 
-        x_ful_2_cat = torch.cat([x2, self.upsample_2(x_ful_32)], dim=1)
-        x_ful_22 = self.ful_gcm_2(x_ful_2_cat)
+        # Refine low-layer features by initial map
+        x, x1, x5 = self.HA(attention_map.sigmoid(), x, x1, x2)
 
-        x_ful_1_cat = torch.cat([x1, self.upsample_2(x_ful_22)], dim=1)
-        x_ful_12 = self.ful_gcm_1(x_ful_1_cat)
+        # produce final saliency map by decoder2
+        x0_2 = self.rfb0_2(x)
+        x1_2 = self.rfb1_2(x1)
+        x5_2 = self.rfb5_2(x5)
 
-        x_ful_0_cat = torch.cat([x, x_ful_12], dim=1)
-        x_ful_02 = self.ful_gcm_0(x_ful_0_cat)
-        ful_out = self.upsample_4(self.ful_conv_out(x_ful_02))
+        y = self.agg2(x5_2, x1_2, x0_2)
 
-        return ful_out, ful_out
+        # PTM module
+        y = self.agant1(y)
+        y = self.deconv1(y)
+        y = self.agant2(y)
+        y = self.deconv2(y)
+        y = self.out2_conv(y)
+
+        return self.upsample(attention_map), y
