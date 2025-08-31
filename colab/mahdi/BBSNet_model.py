@@ -4,7 +4,6 @@ import torch.nn as nn
 from models.ResNet import ResNet50
 from torch.nn import functional as F
 from typing import Tuple
-from models.res2net_v1b_base import Res2Net_model
 from models.swin_cross import SwinTransformer
 
 
@@ -509,10 +508,6 @@ class Fusion(nn.Module):
             attn_drop_rate=attn_dropout, cross_attention=True
         )
 
-        # Learnable fusion weights
-        self.alpha = nn.Parameter(torch.tensor(0.5))
-        self.beta = nn.Parameter(torch.tensor(0.5))
-
         # Post-fusion feedforward network
         hidden_dim = embed_dim * mlp_ratio
         self.mlp = nn.Sequential(
@@ -522,8 +517,6 @@ class Fusion(nn.Module):
             nn.Conv2d(hidden_dim, embed_dim, 1),
             nn.Dropout(dropout)
         )
-
-        # self.norm = nn.BatchNorm2d(embed_dim)
 
     def forward(self, Ri, Ti):
 
@@ -536,11 +529,12 @@ class Fusion(nn.Module):
         dep_cross = self.dep_to_rgb(Ti, Ri)
 
         # Weighted fusion
-        fused = self.alpha * (rgb_self + rgb_cross) + \
-            self.beta * (dep_self + dep_cross)
+        fused = rgb_self + rgb_cross + dep_self + dep_cross
+
+        fused = F.interpolate(fused, size=Ri.shape[-2:], mode='bilinear',
+                              align_corners=False)
 
         # Refinement
-        # fused = self.norm(fused)
         fused = fused + self.mlp(fused)  # residual
 
         # Reduce channels

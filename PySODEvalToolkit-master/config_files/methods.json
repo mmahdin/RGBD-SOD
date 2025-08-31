@@ -6,6 +6,13 @@
             "suffix": ".png"
         }
     },
+    "swin_best": {
+        "NJU2K": {
+            "path": "../pred/swin_best/NJU2K",
+            "prefix": "",
+            "suffix": ".png"
+        }
+    },
     "bbsnet": {
         "NJU2K": {
             "path": "../pred/bbsnet/NJU2K",

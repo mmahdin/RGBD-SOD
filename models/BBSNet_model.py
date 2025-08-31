@@ -473,8 +473,7 @@ class Fusion(nn.Module):
         super(Fusion, self).__init__()
 
         # Channel reduction
-        self.rgb_reduce = BasicConv2d(in_ch, embed_dim, 1)
-        self.dep_reduce = BasicConv2d(in_ch, embed_dim, 1)
+        self.fused_increase = BasicConv2d(embed_dim, in_ch, 1)
 
         # Self-attention for each modality
         self.rgb_self = SwinTransformer(
@@ -508,10 +507,6 @@ class Fusion(nn.Module):
             attn_drop_rate=attn_dropout, cross_attention=True
         )
 
-        # Learnable fusion weights
-        self.alpha = nn.Parameter(torch.tensor(0.5))
-        self.beta = nn.Parameter(torch.tensor(0.5))
-
         # Post-fusion feedforward network
         hidden_dim = embed_dim * mlp_ratio
         self.mlp = nn.Sequential(
@@ -521,8 +516,6 @@ class Fusion(nn.Module):
             nn.Conv2d(hidden_dim, embed_dim, 1),
             nn.Dropout(dropout)
         )
-
-        # self.norm = nn.BatchNorm2d(embed_dim)
 
     def forward(self, Ri, Ti):
 
@@ -535,18 +528,15 @@ class Fusion(nn.Module):
         dep_cross = self.dep_to_rgb(Ti, Ri)
 
         # Weighted fusion
-        fused = self.alpha * (rgb_self + rgb_cross) + \
-            self.beta * (dep_self + dep_cross)
-
-        # Refinement
-        # fused = self.norm(fused)
-        fused = fused + self.mlp(fused)  # residual
+        fused = rgb_self + rgb_cross + dep_self + dep_cross
 
         fused = F.interpolate(fused, size=Ri.shape[-2:], mode='bilinear',
                               align_corners=False)
 
-        # Reduce channels
-        Ri = self.rgb_reduce(Ri)
+        # Refinement
+        fused = fused + self.mlp(fused)  # residual
+
+        fused = self.fused_increase(fused)
 
         return fused + Ri
 
@@ -779,7 +769,7 @@ class BBSNetTransformerAttention(BaseModel):
         dropout = 0.1
 
         embed_dim = [64, 128, 128, 128, 128]
-        heads_stage = (2, 2, 2, 4, 4)
+        heads_stage = (2, 2, 2, 2, 2)
         C = [64, 256, 512, 1024, 2048]           # channel dims from ResNet
         S = [88, 88, 44, 22, 11]
 
@@ -809,16 +799,6 @@ class BBSNetTransformerAttention(BaseModel):
             num_heads=heads_stage[4], window_size=W[4], patch_size=P[4]
         )
 
-        channel = 32
-        self.rfb2_1 = GCM(embed_dim[2], channel)
-        self.rfb3_1 = GCM(embed_dim[3], channel)
-        self.rfb4_1 = GCM(embed_dim[4], channel)
-
-        # Decoder 2
-        self.rfb0_2 = GCM(embed_dim[0], channel)
-        self.rfb1_2 = GCM(embed_dim[1], channel)
-        self.rfb5_2 = GCM(embed_dim[2], channel)
-
         if self.training:
             self.initialize_weights()
 
@@ -834,31 +814,36 @@ class BBSNetTransformerAttention(BaseModel):
         x_depth = self.resnet_depth.relu(x_depth)
         x_depth = self.resnet_depth.maxpool(x_depth)
 
+        # ---- layer0 fusion (64ch) ----
+        x = self.fuse0(x, x_depth)
+
         # layer1
         x1 = self.resnet.layer1(x)
         x1_depth = self.resnet_depth.layer1(x_depth)
+
+        # ---- layer1 fusion (256ch) ----
+        x1 = self.fuse1(x1, x1_depth)
 
         # layer2
         x2 = self.resnet.layer2(x1)
         x2_depth = self.resnet_depth.layer2(x1_depth)
 
+        # ---- layer2 fusion (512ch) ----
+        x2 = self.fuse2(x2, x2_depth)
+
         # layer3_1
         x3_1 = self.resnet.layer3_1(x2)
         x3_1_depth = self.resnet_depth.layer3_1(x2_depth)
+
+        # ---- layer3_1 fusion (1024ch) ----
+        x3_1 = self.fuse3_1(x3_1, x3_1_depth)
 
         # layer4_1
         x4_1 = self.resnet.layer4_1(x3_1)
         x4_1_depth = self.resnet_depth.layer4_1(x3_1_depth)
 
-        # =======================================================
-
-        x = self.fuse0(x, x_depth)
-        x1 = self.fuse1(x1, x1_depth)
-        x2 = self.fuse2(x2, x2_depth)
-        x3_1 = self.fuse3_1(x3_1, x3_1_depth)
+        # ---- layer4_1 fusion (2048ch) ----
         x4_1 = self.fuse4_1(x4_1, x4_1_depth)
-
-        # =======================================================
 
         # produce initial saliency map by decoder1
         x2_1 = self.rfb2_1(x2)
