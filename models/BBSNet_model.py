@@ -501,45 +501,59 @@ class Fusion(nn.Module):
             window_size=window_size, mlp_ratio=mlp_ratio,
             attn_drop_rate=attn_dropout,  cross_attention=True
         )
-        self.dep_cross_attn = SwinTransformer(
-            img_size=(shape, shape), patch_size=patch_size,
-            in_chans=embed_dim, embed_dim=embed_dim,
-            depths=[swin_depth], num_heads=[num_heads],
-            window_size=window_size, mlp_ratio=mlp_ratio,
-            attn_drop_rate=attn_dropout,  cross_attention=True
-        )
+        # self.dep_cross_attn = SwinTransformer(
+        #     img_size=(shape, shape), patch_size=patch_size,
+        #     in_chans=embed_dim, embed_dim=embed_dim,
+        #     depths=[swin_depth], num_heads=[num_heads],
+        #     window_size=window_size, mlp_ratio=mlp_ratio,
+        #     attn_drop_rate=attn_dropout,  cross_attention=True
+        # )
 
-        self.mlp = FeedForward(embed_dim, embed_dim*mlp_ratio, dropout)
+        hidden_dim = embed_dim * mlp_ratio
+        self.mlp = nn.Sequential(
+            nn.Conv2d(embed_dim, hidden_dim, kernel_size=1),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Conv2d(hidden_dim, embed_dim, kernel_size=1),
+            nn.Dropout(dropout)
+        )
 
     def forward(self, Ri: torch.Tensor, Ti: torch.Tensor):
         """
-        Ri: (B, C_r, H, W)
-        Ti: (B, C_t, H, W)
-        returns: Fr, Ft same shapes as Ri and Ti
+        Args:
+            Ri: RGB features  (B, C, H, W)
+            Ti: Depth features (B, C, H, W)
+        Returns:
+            Fused features with RGB dominance
         """
+        # Channel reduction
         Ri = self.channel_reduction_rgb(Ri)
         Ti = self.channel_reduction_dep(Ti)
 
-        B, Cr, H, W = Ri.shape
+        B, C, H, W = Ri.shape
         B2, Ct, H2, W2 = Ti.shape
         assert B == B2 and H == H2 and W == W2, "Inputs must have same batch and spatial dims"
-
-        # rgb_tokens = Ri.flatten(2).transpose(1, 2)  # (B, H*W, C)
-        # dep_tokens = Ti.flatten(2).transpose(1, 2)
 
         # Self-attention
         rgb_self = self.rgb_self_attn(Ri)
         dep_self = self.dep_self_attn(Ti)
 
-        # Cross-attention
+        # Cross-attention: RGB queries attend to Depth
         rgb_cross = self.rgb_cross_attn(Ri, Ti)
-        dep_cross = self.dep_cross_attn(Ti, Ri)
 
-        fused = torch.cat([rgb_self, dep_self, rgb_cross, dep_cross], dim=1)
-        fused = F.interpolate(
-            fused, Ri.shape[2:], mode='bilinear', align_corners=False)
+        # --- FUSION STEP ---
+        # Fuse three key features
+        fused = rgb_self + dep_self + rgb_cross
 
-        fused = self.channel_reduction_fused(fused) + Ri
+        # Upsample to match Ri's resolution
+        fused = F.interpolate(fused, size=(
+            H, W), mode='bilinear', align_corners=False)
+
+        # Refine fused features using custom MLP
+        fused = self.mlp(fused)
+
+        # Final fusion with residual RGB dominance
+        fused = fused + Ri
 
         return fused
 
@@ -770,18 +784,14 @@ class BBSNetTransformerAttention(BaseModel):
 
         dropout = 0.1
 
-        embed_dim = [32, 64, 128, 128, 128]
+        embed_dim = [64, 128, 128, 256, 256]
         heads_stage = (4, 4, 8, 8, 8)
         C = [64, 256, 512, 1024, 2048]           # channel dims from ResNet
         S = [88, 88, 44, 22, 11]
 
         # you can also set per stage (smaller patch for early layers)
-        P = [1, 1, 1, 1, 1]
-        W = [8, 8, 11, 11, 11]
-
-        self.layer_rgb = Res2Net_model(50)
-        self.layer_dep = Res2Net_model(50)
-        self.layer_dep0 = nn.Conv2d(1, 3, kernel_size=1)
+        P = [4, 4, 2, 1, 1]
+        W = [11, 11, 11, 11, 11]
 
         # Replace FusionBlock2D with RGBDViTBlock
         self.fuse0 = Fusion(

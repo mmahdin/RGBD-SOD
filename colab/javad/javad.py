@@ -136,6 +136,20 @@ writer = SummaryWriter(save_path + 'summary')
 step = 0
 
 
+def structure_loss(pred, mask):
+    weit = 1 + 5 * \
+        torch.abs(F.avg_pool2d(mask, kernel_size=31,
+                  stride=1, padding=15) - mask)
+    wbce = F.binary_cross_entropy_with_logits(pred, mask, reduce='none')
+    wbce = (weit * wbce).sum(dim=(2, 3)) / weit.sum(dim=(2, 3))
+
+    pred = torch.sigmoid(pred)
+    inter = ((pred * mask) * weit).sum(dim=(2, 3))
+    union = ((pred + mask) * weit).sum(dim=(2, 3))
+    wiou = 1 - (inter + 1) / (union - inter + 1)
+    return (wbce + wiou).mean()
+
+
 def train(train_loader, model, optimizer, epoch, save_path, pending_unembed=None):
     global step
     model.train()
@@ -157,9 +171,9 @@ def train(train_loader, model, optimizer, epoch, save_path, pending_unembed=None
             print("Restored _out_proj weights into model.")
             pending_unembed = None  # restore only once
 
-        loss1 = CE(s1, gts)
-        loss2 = CE(s2, gts)
-        loss = loss1 + loss2
+        loss1 = structure_loss(s1, gts)
+        loss2 = structure_loss(s2, gts)
+        loss = 0.7*loss1 + 0.9*loss2
         loss.backward()
 
         clip_gradient(optimizer, opt.clip)
