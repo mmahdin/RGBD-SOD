@@ -3,7 +3,7 @@ from optionsjavad import opt
 import torch.backends.cudnn as cudnn
 import logging
 from tensorboardX import SummaryWriter
-from utils import clip_gradient, adjust_lr
+from utilsjavad import clip_gradient, adjust_lr
 from models.BBSNet_model_javad import BBSNetTransformerAttention as BBSNet
 # from models.BBSNet_model import BBSNetSwin as BBSNet
 from torchvision.utils import make_grid
@@ -174,6 +174,9 @@ def train(train_loader, model, optimizer, epoch, save_path, pending_unembed=None
         loss1 = structure_loss(s1, gts)
         loss2 = structure_loss(s2, gts)
         loss = 0.7*loss1 + 0.9*loss2
+        # loss1 = CE(s1, gts)
+        # loss2 = CE(s2, gts)
+        # loss = loss1 + loss2
         loss.backward()
 
         clip_gradient(optimizer, opt.clip)
