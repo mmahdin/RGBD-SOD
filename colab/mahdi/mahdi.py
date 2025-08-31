@@ -171,9 +171,12 @@ def train(train_loader, model, optimizer, epoch, save_path, pending_unembed=None
             print("Restored _out_proj weights into model.")
             pending_unembed = None  # restore only once
 
-        loss1 = structure_loss(s1, gts)
-        loss2 = structure_loss(s2, gts)
-        loss = 0.7*loss1 + 0.9*loss2
+        # loss1 = structure_loss(s1, gts)
+        # loss2 = structure_loss(s2, gts)
+        # loss = 0.7*loss1 + 0.9*loss2
+        loss1 = CE(s1, gts)
+        loss2 = CE(s2, gts)
+        loss = loss1 + loss2
         loss.backward()
 
         clip_gradient(optimizer, opt.clip)

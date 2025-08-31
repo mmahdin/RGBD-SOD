@@ -1,7 +1,49 @@
 {
+    "NLPR": {
+        "mask": {
+            "path": "../gt/NLPR",
+            "prefix": "",
+            "suffix": ".png"
+        }
+    },
+    "SIP": {
+        "mask": {
+            "path": "../gt/SIP",
+            "prefix": "",
+            "suffix": ".png"
+        }
+    },
     "NJU2K": {
         "mask": {
             "path": "../gt/NJU2K",
+            "prefix": "",
+            "suffix": ".png"
+        }
+    },
+    "DES": {
+        "mask": {
+            "path": "../gt/DES",
+            "prefix": "",
+            "suffix": ".png"
+        }
+    },
+    "LFSD": {
+        "mask": {
+            "path": "../gt/LFSD",
+            "prefix": "",
+            "suffix": ".png"
+        }
+    },
+    "STERE": {
+        "mask": {
+            "path": "../gt/STERE",
+            "prefix": "",
+            "suffix": ".png"
+        }
+    },
+    "SSD": {
+        "mask": {
+            "path": "../gt/SSD",
             "prefix": "",
             "suffix": ".png"
         }
