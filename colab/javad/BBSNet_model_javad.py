@@ -905,7 +905,7 @@ class BBSNetTransformerAttention(BaseModel):
         # =======================================================
 
         # Refine low-layer features by initial map
-        _, _, x5 = self.HA(attention_map.sigmoid(), x, x1, x2)
+        x0, x1, x5 = self.HA(attention_map.sigmoid(), x, x1, x2)
 
         # produce final saliency map by decoder2
         x0_2 = self.rfb0_2(x)

@@ -75,8 +75,8 @@ def test(method="patchify_light_pos_embed"):
     model.eval()
 
     # test
-    test_datasets = ["test_in_train"]
-    # test_datasets = ['NJU2K', 'NLPR', 'STERE', 'DES', 'SSD', 'LFSD', 'SIP']
+    # test_datasets = ["test_in_train"]
+    test_datasets = ['NJU2K', 'NLPR', 'STERE', 'DES', 'SSD', 'LFSD', 'SIP']
     for dataset in test_datasets:
         save_path = f"./pred/{method}/{dataset}/"
         if not os.path.exists(save_path):

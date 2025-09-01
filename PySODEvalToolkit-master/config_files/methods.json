@@ -1,118 +1,37 @@
 {
-    "patchify_light_pos_embed": {
+    "best": {
         "NLPR": {
-            "path": "../pred/patchify_light_pos_embed/NLPR",
+            "path": "../pred/best/NLPR",
             "prefix": "",
             "suffix": ".png"
         },
         "SIP": {
-            "path": "../pred/patchify_light_pos_embed/SIP",
+            "path": "../pred/best/SIP",
             "prefix": "",
             "suffix": ".png"
         },
         "NJU2K": {
-            "path": "../pred/patchify_light_pos_embed/NJU2K",
+            "path": "../pred/best/NJU2K",
             "prefix": "",
             "suffix": ".png"
         },
         "DES": {
-            "path": "../pred/patchify_light_pos_embed/DES",
+            "path": "../pred/best/DES",
             "prefix": "",
             "suffix": ".png"
         },
         "LFSD": {
-            "path": "../pred/patchify_light_pos_embed/LFSD",
+            "path": "../pred/best/LFSD",
             "prefix": "",
             "suffix": ".png"
         },
         "STERE": {
-            "path": "../pred/patchify_light_pos_embed/STERE",
+            "path": "../pred/best/STERE",
             "prefix": "",
             "suffix": ".png"
         },
         "SSD": {
-            "path": "../pred/patchify_light_pos_embed/SSD",
-            "prefix": "",
-            "suffix": ".png"
-        }
-    },
-    "swin_best2": {
-        "NLPR": {
-            "path": "../pred/swin_best2/NLPR",
-            "prefix": "",
-            "suffix": ".png"
-        },
-        "SIP": {
-            "path": "../pred/swin_best2/SIP",
-            "prefix": "",
-            "suffix": ".png"
-        },
-        "NJU2K": {
-            "path": "../pred/swin_best2/NJU2K",
-            "prefix": "",
-            "suffix": ".png"
-        },
-        "DES": {
-            "path": "../pred/swin_best2/DES",
-            "prefix": "",
-            "suffix": ".png"
-        },
-        "LFSD": {
-            "path": "../pred/swin_best2/LFSD",
-            "prefix": "",
-            "suffix": ".png"
-        },
-        "STERE": {
-            "path": "../pred/swin_best2/STERE",
-            "prefix": "",
-            "suffix": ".png"
-        },
-        "SSD": {
-            "path": "../pred/swin_best2/SSD",
-            "prefix": "",
-            "suffix": ".png"
-        }
-    },
-    "swin_best": {
-        "NJU2K": {
-            "path": "../pred/swin_best/NJU2K",
-            "prefix": "",
-            "suffix": ".png"
-        }
-    },
-    "bbsnet": {
-        "NLPR": {
-            "path": "../pred/bbsnet/NLPR",
-            "prefix": "",
-            "suffix": ".png"
-        },
-        "SIP": {
-            "path": "../pred/bbsnet/SIP",
-            "prefix": "",
-            "suffix": ".png"
-        },
-        "NJU2K": {
-            "path": "../pred/bbsnet/NJU2K",
-            "prefix": "",
-            "suffix": ".png"
-        },
-        "DES": {
-            "path": "../pred/bbsnet/DES",
-            "prefix": "",
-            "suffix": ".png"
-        },
-        "LFSD": {
-            "path": "../pred/bbsnet/LFSD",
-            "prefix": "",
-            "suffix": ".png"
-        },
-        "STERE": {
-            "path": "../pred/bbsnet/STERE",
-            "prefix": "",
-            "suffix": ".png"
-        },
-        "SSD": {
-            "path": "../pred/bbsnet/SSD",
+            "path": "../pred/best/SSD",
             "prefix": "",
             "suffix": ".png"
         }

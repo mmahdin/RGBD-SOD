@@ -28,25 +28,25 @@ methods = [m for m in os.listdir(
     PRED_ROOT) if os.path.isdir(os.path.join(PRED_ROOT, m))]
 
 # Create method_configs dictionary
-method_configs = {}
-for m in methods:
-    method_configs[m] = {}
-    method_ds_dirs = [ds for ds in os.listdir(os.path.join(PRED_ROOT, m))
-                      if os.path.isdir(os.path.join(PRED_ROOT, m, ds))]
-    for ds in method_ds_dirs:
-        if ds in datasets:  # Only include if the dataset exists in gt
-            method_configs[m][ds] = {
-                "path": os.path.join(PRED_ROOT, m, ds),
-                "prefix": "",  # Assuming no prefix in prediction filenames
-                "suffix": ".png"
-            }
+# method_configs = {}
+# for m in methods:
+#     method_configs[m] = {}
+#     method_ds_dirs = [ds for ds in os.listdir(os.path.join(PRED_ROOT, m))
+#                       if os.path.isdir(os.path.join(PRED_ROOT, m, ds))]
+#     for ds in method_ds_dirs:
+#         if ds in datasets:  # Only include if the dataset exists in gt
+#             method_configs[m][ds] = {
+#                 "path": os.path.join(PRED_ROOT, m, ds),
+#                 "prefix": "",  # Assuming no prefix in prediction filenames
+#                 "suffix": ".png"
+#             }
 
 # Write dataset_config to JSON file
 with open(DATASET_CONFIG, "w") as f:
     json.dump(dataset_config, f, indent=4)
 
 # Write method_configs to JSON file
-with open(METHOD_CONFIG, "w") as f:
-    json.dump(method_configs, f, indent=4)
+# with open(METHOD_CONFIG, "w") as f:
+#     json.dump(method_configs, f, indent=4)
 
 print("Config files created: dataset_config.json and method_configs.json")
