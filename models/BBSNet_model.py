@@ -525,16 +525,9 @@ class Fusion(nn.Module):
         # Weighted fusion
         fused = rgb_self + rgb_cross + dep_self
 
-        # [1, 128, 44, 44]
-        fused = F.interpolate(fused, size=Ri.shape[-2:], mode='bilinear',
-                              align_corners=False)
-
-        # Refinement
-        fused = fused + self.mlp(fused)  # residual
-
-        # Reduce channels
-        # [1, 128, 44, 44]
         Ri = self.rgb_reduce(Ri)
+        Ri = F.interpolate(Ri, size=fused.shape[-2:], mode='bilinear',
+                           align_corners=False)
 
         return fused + Ri
 
@@ -598,6 +591,76 @@ class GuidedFusion(nn.Module):
                             align_corners=False)
 
         return out + self.rgb_channel(rgb)
+
+
+class SwinGCM(nn.Module):
+    def __init__(self, in_ch, embed_dim, shape, swin_depth,
+                 num_heads, window_size, mlp_ratio=4,
+                 attn_dropout=0.2, dropout=0.2, patch_size=4):
+        super(SwinGCM, self).__init__()
+
+        self.gcm_self = SwinTransformer(
+            img_size=(shape, shape), patch_size=patch_size,
+            in_chans=in_ch, embed_dim=embed_dim, drop_rate=dropout,
+            depths=[swin_depth], num_heads=[num_heads],
+            window_size=window_size, mlp_ratio=mlp_ratio,
+            attn_drop_rate=attn_dropout
+        )
+
+    def forward(self, x):
+        # [1, 128, 22, 22]
+        return self.gcm_self(x)
+
+
+class SwinAgg(nn.Module):
+    def __init__(self, in_ch, embed_dim, shape, swin_depth,
+                 num_heads, window_size, mlp_ratio=4, out_shape=(44, 44),
+                 attn_dropout=0.2, dropout=0.2, patch_size=4):
+        super(SwinAgg, self).__init__()
+
+        self.s1_channel = BasicConv2d(embed_dim, 96, 1)
+        self.att_channel = BasicConv2d(embed_dim, 1, 1)
+
+        if shape[0] > window_size:
+            swin_depth = 2
+        else:
+            swin_depth = 1
+
+        self.a2b = SwinTransformer(
+            img_size=(shape[0], shape[0]), patch_size=patch_size,
+            in_chans=in_ch, embed_dim=embed_dim, drop_rate=dropout,
+            depths=[swin_depth], num_heads=[num_heads],
+            window_size=window_size, mlp_ratio=mlp_ratio,
+            attn_drop_rate=attn_dropout, cross_attention=True
+        )
+
+        if shape[1] > window_size:
+            swin_depth = 2
+        else:
+            swin_depth = 1
+        self.a2c = SwinTransformer(
+            img_size=(shape[1], shape[1]), patch_size=patch_size,
+            in_chans=in_ch, embed_dim=embed_dim, drop_rate=dropout,
+            depths=[swin_depth], num_heads=[num_heads],
+            window_size=window_size, mlp_ratio=mlp_ratio,
+            attn_drop_rate=attn_dropout, cross_attention=True
+        )
+
+        self.out_shape = out_shape
+
+    def forward(self, a, b, c):
+        # a: [1, 128, 11, 11], b: [1, 128, 11, 11], c: [1, 128, 22, 22]
+        a = F.interpolate(a, size=b.shape[-2:], mode='bilinear',
+                          align_corners=False)
+        a2b = self.a2b(a, b)
+
+        a2b = F.interpolate(a2b, size=c.shape[-2:], mode='bilinear',
+                            align_corners=False)
+        a2c = self.a2c(a2b, c)
+
+        out = F.interpolate(a2c, size=self.out_shape, mode='bilinear',
+                            align_corners=False)
+        return self.att_channel(out), self.s1_channel(out)
 
 
 # ==================================================================
@@ -858,10 +921,26 @@ class BBSNetTransformerAttention(BaseModel):
             num_heads=heads_stage[4], window_size=W[4], patch_size=P[4]
         )
 
+        self.swin_gcm2 = SwinGCM(
+            in_ch=embed_dim[2], embed_dim=embed_dim[2], shape=S[2]//P[2], swin_depth=2,
+            num_heads=heads_stage[2], window_size=11, patch_size=1
+        )
+        self.swin_gcm3 = SwinGCM(
+            in_ch=embed_dim[3], embed_dim=embed_dim[3], shape=S[3]//P[3], swin_depth=1,
+            num_heads=heads_stage[3], window_size=11, patch_size=1
+        )
+        self.swin_gcm4 = SwinGCM(
+            in_ch=embed_dim[4], embed_dim=embed_dim[4], shape=S[4]//P[4], swin_depth=1,
+            num_heads=heads_stage[4], window_size=11, patch_size=1
+        )
+
+        self.agg = SwinAgg(
+            in_ch=embed_dim[4], embed_dim=embed_dim[4], shape=[S[3]//P[3], S[2]//P[2]], swin_depth=2,
+            num_heads=heads_stage[4], window_size=11, patch_size=1
+        )
+
         channel = 32
         self.rfb2_1 = GCM(embed_dim[2], channel)
-        self.rfb3_1 = GCM(embed_dim[3], channel)
-        self.rfb4_1 = GCM(embed_dim[4], channel)
 
         # Decoder 2
         self.rfb0_2 = GCM(embed_dim[0], channel)
@@ -908,11 +987,15 @@ class BBSNetTransformerAttention(BaseModel):
         # =======================================================
 
         # produce initial saliency map by decoder1
-        x2_1 = self.rfb2_1(x2)
-        x3_1 = self.rfb3_1(x3_1)
-        x4_1 = self.rfb4_1(x4_1)
+        # x2_1 = self.rfb2_1(x2)
 
-        attention_map, s1 = self.agg1(x4_1, x3_1, x2_1)
+        x2_swin = self.swin_gcm2(x2)
+        x3_swin = self.swin_gcm3(x3_1)
+        x4_swin = self.swin_gcm4(x4_1)
+
+        attention_map, s1 = self.agg(x4_swin, x3_swin, x2_swin)
+
+        # attention_map, s1 = self.agg1(x4_1, x3_1, x2_1)
 
         # =======================================================
 
@@ -922,6 +1005,8 @@ class BBSNetTransformerAttention(BaseModel):
         # =======================================================
 
         # Refine low-layer features by initial map
+        x2 = F.interpolate(x2, size=(44, 44), mode='bilinear',
+                           align_corners=False)
         x, x1, x5 = self.HA(attention_map.sigmoid(), x, x1, x2)
 
         # produce final saliency map by decoder2
