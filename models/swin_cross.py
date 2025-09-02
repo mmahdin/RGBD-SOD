@@ -132,8 +132,8 @@ class WindowAttention(nn.Module):
             self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
 
         self.attn_drop = nn.Dropout(attn_drop)
-        self.proj = nn.Linear(dim, dim)
-        self.proj_drop = nn.Dropout(proj_drop)
+        # self.proj = nn.Linear(dim, dim)
+        # self.proj_drop = nn.Dropout(proj_drop)
 
         trunc_normal_(self.relative_position_bias_table, std=.02)
         self.softmax = nn.Softmax(dim=-1)
@@ -181,8 +181,6 @@ class WindowAttention(nn.Module):
         attn = self.attn_drop(attn)
 
         x = (attn @ v).transpose(1, 2).reshape(B_, N, C)
-        x = self.proj(x)
-        x = self.proj_drop(x)
         return x
 
     def extra_repr(self) -> str:
@@ -288,20 +286,20 @@ class SwinTransformerBlock(nn.Module):
             self.window_size = min(self.input_resolution)
         assert 0 <= self.shift_size < self.window_size, "shift_size must in 0-window_size"
 
-        self.norm1 = norm_layer(dim)
-        if self.cross_attention:
-            self.norm_y = norm_layer(dim)  # Separate norm for y
+        # self.norm1 = norm_layer(dim)
+        # if self.cross_attention:
+        #     self.norm_y = norm_layer(dim)  # Separate norm for y
         self.attn = WindowAttention(
             dim, window_size=to_2tuple(window_size), num_heads=num_heads,
             qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop,
             cross_attention=cross_attention)
 
-        self.drop_path = DropPath(
-            drop_path) if drop_path > 0. else nn.Identity()
-        self.norm2 = norm_layer(dim)
-        mlp_hidden_dim = int(dim * mlp_ratio)
-        self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim,
-                       act_layer=act_layer, drop=drop)
+        # self.drop_path = DropPath(
+        #     drop_path) if drop_path > 0. else nn.Identity()
+        # self.norm2 = norm_layer(dim)
+        # mlp_hidden_dim = int(dim * mlp_ratio)
+        # self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim,
+        #                act_layer=act_layer, drop=drop)
 
         if self.shift_size > 0:
             # calculate attention mask for SW-MSA
@@ -332,27 +330,18 @@ class SwinTransformerBlock(nn.Module):
         self.register_buffer("attn_mask", attn_mask)
 
     def forward(self, x, y=None):
-        # x: [1, 9216, 128]
-
         H, W = self.input_resolution
         B, L, C = x.shape
         assert L == H * W, "input feature has wrong size"
 
-        shortcut = x
-        x = self.norm1(x)
-        x = x.view(B, H, W, C)  # [1, 96, 96, 128]
+        x = x.view(B, H, W, C)
 
-        # Process y if provided for cross-attention
         if y is not None and self.cross_attention:
-            y = self.norm_y(y)
             y = y.view(B, H, W, C)
-            # Apply same window shift to y as x
             if self.shift_size > 0:
-                shifted_y = torch.roll(
-                    y, shifts=(-self.shift_size, -self.shift_size), dims=(1, 2))
-            else:
-                shifted_y = y
-            y_windows = window_partition(shifted_y, self.window_size)
+                y = torch.roll(y, shifts=(-self.shift_size, -
+                               self.shift_size), dims=(1, 2))
+            y_windows = window_partition(y, self.window_size)
             y_windows = y_windows.view(-1,
                                        self.window_size * self.window_size, C)
         else:
@@ -360,41 +349,26 @@ class SwinTransformerBlock(nn.Module):
 
         # cyclic shift
         if self.shift_size > 0:
-            # [1, 96, 96, 128]
-            shifted_x = torch.roll(
-                x, shifts=(-self.shift_size, -self.shift_size), dims=(1, 2))
-        else:
-            shifted_x = x
+            x = torch.roll(x, shifts=(-self.shift_size, -
+                           self.shift_size), dims=(1, 2))
 
         # partition windows
-        # (num_windows*B, window_size, window_size, C): [64, 12, 12, 128]
-        x_windows = window_partition(shifted_x, self.window_size)
-
-        # (num_windows*B, window_size*window_size, C): [64, 12*12, 128]
+        x_windows = window_partition(x, self.window_size)
         x_windows = x_windows.view(-1, self.window_size * self.window_size, C)
 
-        # W-MSA/SW-MSA
-
-        attn_windows = self.attn(
-            x_windows, y=y_windows, mask=self.attn_mask)  # [64, 144, 128]
+        # window attention only
+        attn_windows = self.attn(x_windows, y=y_windows, mask=self.attn_mask)
 
         # merge windows
-        attn_windows = attn_windows.view(-1,
-                                         self.window_size, self.window_size, C)
-        shifted_x = window_reverse(
-            attn_windows, self.window_size, H, W)  # [1, 96, 96, 128]
+        x = attn_windows.view(-1, self.window_size, self.window_size, C)
+        x = window_reverse(x, self.window_size, H, W)
 
         # reverse cyclic shift
         if self.shift_size > 0:
-            x = torch.roll(shifted_x, shifts=(
-                self.shift_size, self.shift_size), dims=(1, 2))
-        else:
-            x = shifted_x
-        x = x.view(B, H * W, C)
+            x = torch.roll(x, shifts=(self.shift_size,
+                           self.shift_size), dims=(1, 2))
 
-        # FFN
-        x = shortcut + self.drop_path(x)
-        x = x + self.drop_path(self.mlp(self.norm2(x)))  # [1, 9216, 128]
+        x = x.view(B, H * W, C)
         return x
 
     def extra_repr(self) -> str:
@@ -617,7 +591,7 @@ class SwinTransformer(nn.Module):
             )
             self.layers.append(layer)
 
-        self.norm = norm_layer(self.num_features)
+        # self.norm = norm_layer(self.num_features)
         self.apply(self._init_weights)
 
     def _init_weights(self, m):
@@ -671,7 +645,7 @@ class SwinTransformer(nn.Module):
                         1).permute(0, 3, 1, 2).contiguous()
             layer_features.append(xl)
 
-        x = self.norm(x)
+        # x = self.norm(x)
         B, L, C = x.shape
         x = x.view(B, int(np.sqrt(L)), int(np.sqrt(L)), -
                    1).permute(0, 3, 1, 2).contiguous()

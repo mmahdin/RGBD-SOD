@@ -77,6 +77,7 @@ def test(method="patchify_light_pos_embed"):
     # test
     # test_datasets = ["test_in_train"]
     test_datasets = ['NJU2K', 'NLPR', 'STERE', 'DES', 'SSD', 'LFSD', 'SIP']
+    pending_restored = False
     for dataset in test_datasets:
         save_path = f"./pred/{method}/{dataset}/"
         if not os.path.exists(save_path):
@@ -86,7 +87,7 @@ def test(method="patchify_light_pos_embed"):
         depth_root = dataset_path + dataset + "/depth/"
         test_loader = test_dataset(
             image_root, gt_root, depth_root, opt.testsize)
-        pending_restored = False
+
         for i in range(test_loader.size):
             image, gt, depth, name, image_for_post = test_loader.load_data()
             gt = np.asarray(gt, np.float32)
