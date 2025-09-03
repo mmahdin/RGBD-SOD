@@ -1,7 +1,7 @@
 import argparse
 import sys
 
-version = 'fullspatial_cpa_heavy'
+version = 'fullspatial_cpa_cross_only'
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--epoch', type=int, default=200, help='epoch number')

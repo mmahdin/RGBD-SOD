@@ -245,40 +245,36 @@ class Fusion(nn.Module):
         self.dep_reduce = BasicConv2d(in_ch, embed_dim, 1)
 
         # Self-attention for each modality
-        self.rgb_self = SwinTransformer(
-            img_size=(shape, shape), patch_size=patch_size,
-            in_chans=in_ch, embed_dim=embed_dim,
-            depths=[swin_depth], num_heads=[num_heads],
-            window_size=window_size, mlp_ratio=mlp_ratio,
-            attn_drop_rate=attn_dropout
-        )
-        self.dep_self = SwinTransformer(
-            img_size=(shape, shape), patch_size=patch_size,
-            in_chans=in_ch, embed_dim=embed_dim,
-            depths=[swin_depth], num_heads=[num_heads],
-            window_size=window_size, mlp_ratio=mlp_ratio,
-            attn_drop_rate=attn_dropout
-        )
+        # self.rgb_self = SwinTransformer(
+        #     img_size=(shape, shape), patch_size=patch_size,
+        #     in_chans=in_ch, embed_dim=embed_dim,
+        #     depths=[swin_depth], num_heads=[num_heads],
+        #     window_size=window_size, mlp_ratio=mlp_ratio,
+        #     attn_drop_rate=attn_dropout
+        # )
+        # self.dep_self = SwinTransformer(
+        #     img_size=(shape, shape), patch_size=patch_size,
+        #     in_chans=in_ch, embed_dim=embed_dim,
+        #     depths=[swin_depth], num_heads=[num_heads],
+        #     window_size=window_size, mlp_ratio=mlp_ratio,
+        #     attn_drop_rate=attn_dropout
+        # )
 
         # Bi-directional cross-attention
         self.rgb_to_dep = SwinTransformer(
-            img_size=(shape//patch_size, shape//patch_size), patch_size=1,
-            in_chans=embed_dim, embed_dim=embed_dim,
+            img_size=(shape, shape), patch_size=1,
+            in_chans=in_ch, embed_dim=embed_dim,
             depths=[1], num_heads=[num_heads],
             window_size=11, mlp_ratio=mlp_ratio,
             attn_drop_rate=attn_dropout, cross_attention=True
         )
         self.dep_to_rgb = SwinTransformer(
-            img_size=(shape//patch_size, shape//patch_size), patch_size=1,
-            in_chans=embed_dim, embed_dim=embed_dim,
+            img_size=(shape, shape), patch_size=1,
+            in_chans=in_ch, embed_dim=embed_dim,
             depths=[1], num_heads=[num_heads],
             window_size=11, mlp_ratio=mlp_ratio,
             attn_drop_rate=attn_dropout, cross_attention=True
         )
-
-        # Learnable fusion weights
-        self.alpha = nn.Parameter(torch.tensor(0.5))
-        self.beta = nn.Parameter(torch.tensor(0.5))
 
         # Post-fusion feedforward network
         hidden_dim = embed_dim * mlp_ratio
@@ -295,15 +291,15 @@ class Fusion(nn.Module):
     def forward(self, Ri, Ti):
 
         # Self-attention
-        rgb_self = self.rgb_self(Ri)
-        dep_self = self.dep_self(Ti)
+        # rgb_self = self.rgb_self(Ri)
+        # dep_self = self.dep_self(Ti)
 
         # Bi-directional cross-attention
-        rgb_cross = self.rgb_to_dep(rgb_self, dep_self)
-        dep_cross = self.dep_to_rgb(dep_self, rgb_self)
+        rgb_cross = self.rgb_to_dep(Ri, Ti)
+        dep_cross = self.dep_to_rgb(Ti, Ri)
 
         # Weighted fusion
-        fused = rgb_self + dep_self + rgb_cross + dep_cross
+        fused = rgb_cross + dep_cross
 
         # Refinement
         # fused = self.norm(fused)
@@ -318,90 +314,6 @@ class Fusion(nn.Module):
         return fused + Ri
 
 # ==================================================================
-
-
-# Feature Rectify Module
-class ChannelWeights(nn.Module):
-    def __init__(self, dim, reduction=4):  # <-- add strong reduction
-        super(ChannelWeights, self).__init__()
-        self.dim = dim
-        hidden_dim = dim // reduction  # bottleneck dimension
-
-        self.avg_pool = nn.AdaptiveAvgPool2d(1)
-        self.max_pool = nn.AdaptiveMaxPool2d(1)
-
-        # bottleneck MLP
-        self.mlp = nn.Sequential(
-            nn.Linear(self.dim * 4, hidden_dim),   # reduce first
-            nn.ReLU(inplace=True),
-            nn.Linear(hidden_dim, self.dim * 2),   # then expand back
-            nn.Sigmoid()
-        )
-
-    def forward(self, x1, x2):
-        B, _, H, W = x1.shape
-        x = torch.cat((x1, x2), dim=1)                # B, 2C, H, W
-        avg = self.avg_pool(x).view(B, self.dim * 2)
-        max = self.max_pool(x).view(B, self.dim * 2)
-        y = torch.cat((avg, max), dim=1)              # B, 4C
-        y = self.mlp(y).view(B, self.dim * 2, 1)
-        channel_weights = y.reshape(B, 2, self.dim, 1, 1).permute(
-            1, 0, 2, 3, 4)                            # 2, B, C, 1, 1
-        return channel_weights
-
-
-class SpatialWeights(nn.Module):
-    def __init__(self, dim, reduction=4):  # <-- also reduce here
-        super(SpatialWeights, self).__init__()
-        self.dim = dim
-        hidden_dim = dim // reduction
-
-        self.mlp = nn.Sequential(
-            nn.Conv2d(self.dim * 2, hidden_dim, kernel_size=1),   # reduce
-            nn.ReLU(inplace=True),
-            nn.Conv2d(hidden_dim, 2, kernel_size=1),              # expand back
-            nn.Sigmoid()
-        )
-
-    def forward(self, x1, x2):
-        B, _, H, W = x1.shape
-        x = torch.cat((x1, x2), dim=1)   # B, 2C, H, W
-        spatial_weights = self.mlp(x).reshape(
-            B, 2, 1, H, W).permute(1, 0, 2, 3, 4)  # 2, B, 1, H, W
-        return spatial_weights
-
-
-class FeatureRectifyModule(nn.Module):
-    def __init__(self, dim, reduction=1, lambda_c=.5, lambda_s=.5):
-        super(FeatureRectifyModule, self).__init__()
-        self.lambda_c = lambda_c
-        self.lambda_s = lambda_s
-        self.channel_weights = ChannelWeights(dim=dim, reduction=reduction)
-        self.spatial_weights = SpatialWeights(dim=dim, reduction=reduction)
-
-    def _init_weights(self, m):
-        if isinstance(m, nn.Linear):
-            trunc_normal_(m.weight, std=.02)
-            if isinstance(m, nn.Linear) and m.bias is not None:
-                nn.init.constant_(m.bias, 0)
-        elif isinstance(m, nn.LayerNorm):
-            nn.init.constant_(m.bias, 0)
-            nn.init.constant_(m.weight, 1.0)
-        elif isinstance(m, nn.Conv2d):
-            fan_out = m.kernel_size[0] * m.kernel_size[1] * m.out_channels
-            fan_out //= m.groups
-            m.weight.data.normal_(0, math.sqrt(2.0 / fan_out))
-            if m.bias is not None:
-                m.bias.data.zero_()
-
-    def forward(self, x1, x2):
-        channel_weights = self.channel_weights(x1, x2)
-        spatial_weights = self.spatial_weights(x1, x2)
-        out_x1 = x1 + self.lambda_c * \
-            channel_weights[1] * x2 + self.lambda_s * spatial_weights[1] * x2
-        out_x2 = x2 + self.lambda_c * \
-            channel_weights[0] * x1 + self.lambda_s * spatial_weights[0] * x1
-        return out_x1, out_x2
 
 
 class CPA(nn.Module):
@@ -684,17 +596,11 @@ class BBSNetTransformerAttention(BaseModel):
         self.rfb1_2 = GCM(embed_dim[1], channel)
         self.rfb5_2 = GCM(embed_dim[2], channel)
 
-        self.rectify0 = FeatureRectifyModule(C[0])
-        self.rectify1 = FeatureRectifyModule(C[1])
-        self.rectify2 = FeatureRectifyModule(C[2])
-        self.rectify3 = FeatureRectifyModule(C[3])
-        self.rectify4 = FeatureRectifyModule(C[4])
-
-        # self.cpa0 = CPA(C[0])
-        # self.cpa1 = CPA(C[1])
-        # self.cpa2 = CPA(C[2])
-        # self.cpa3 = CPA(C[3])
-        # self.cpa4 = CPA(C[4])
+        self.cpa0 = CPA(C[0])
+        self.cpa1 = CPA(C[1])
+        self.cpa2 = CPA(C[2])
+        self.cpa3 = CPA(C[3])
+        self.cpa4 = CPA(C[4])
 
         if self.training:
             self.initialize_weights()
@@ -711,32 +617,27 @@ class BBSNetTransformerAttention(BaseModel):
         x_depth = self.resnet_depth.relu(x_depth)
         x_depth = self.resnet_depth.maxpool(x_depth)
 
-        x, x_depth = self.rectify0(x, x_depth)
-        # x = x + self.cpa0(x_depth)
+        x = x + self.cpa0(x_depth)
 
         # layer1
         x1 = self.resnet.layer1(x)
         x1_depth = self.resnet_depth.layer1(x_depth)
-        x1, x1_depth = self.rectify1(x1, x1_depth)
-        # x1 = x1 + self.cpa1(x1_depth)
+        x1 = x1 + self.cpa1(x1_depth)
 
         # layer2
         x2 = self.resnet.layer2(x1)
         x2_depth = self.resnet_depth.layer2(x1_depth)
-        x2, x2_depth = self.rectify2(x2, x2_depth)
-        # x2 = x2 + self.cpa2(x2_depth)
+        x2 = x2 + self.cpa2(x2_depth)
 
         # layer3_1
         x3_1 = self.resnet.layer3_1(x2)
         x3_1_depth = self.resnet_depth.layer3_1(x2_depth)
-        x3_1, x3_1_depth = self.rectify3(x3_1, x3_1_depth)
-        # x3_1 = x3_1 + self.cpa3(x3_1_depth)
+        x3_1 = x3_1 + self.cpa3(x3_1_depth)
 
         # layer4_1
         x4_1 = self.resnet.layer4_1(x3_1)
         x4_1_depth = self.resnet_depth.layer4_1(x3_1_depth)
-        x4_1, x4_1_depth = self.rectify4(x4_1, x4_1_depth)
-        # x4_1 = x4_1 + self.cpa4(x4_1_depth)
+        x4_1 = x4_1 + self.cpa4(x4_1_depth)
 
         # =======================================================
 
