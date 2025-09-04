@@ -244,37 +244,41 @@ class Fusion(nn.Module):
         self.rgb_reduce = BasicConv2d(in_ch, embed_dim, 1)
         self.dep_reduce = BasicConv2d(in_ch, embed_dim, 1)
 
-        # # Self-attention for each modality
-        # self.rgb_self = SwinTransformer(
-        #     img_size=(shape, shape), patch_size=patch_size,
-        #     in_chans=in_ch, embed_dim=embed_dim,
-        #     depths=[swin_depth], num_heads=[num_heads],
-        #     window_size=window_size, mlp_ratio=mlp_ratio,
-        #     attn_drop_rate=attn_dropout
-        # )
-        # self.dep_self = SwinTransformer(
-        #     img_size=(shape, shape), patch_size=patch_size,
-        #     in_chans=in_ch, embed_dim=embed_dim,
-        #     depths=[swin_depth], num_heads=[num_heads],
-        #     window_size=window_size, mlp_ratio=mlp_ratio,
-        #     attn_drop_rate=attn_dropout
-        # )
+        # Self-attention for each modality
+        self.rgb_self = SwinTransformer(
+            img_size=(shape, shape), patch_size=patch_size,
+            in_chans=in_ch, embed_dim=embed_dim,
+            depths=[swin_depth], num_heads=[num_heads],
+            window_size=window_size, mlp_ratio=mlp_ratio,
+            attn_drop_rate=attn_dropout
+        )
+        self.dep_self = SwinTransformer(
+            img_size=(shape, shape), patch_size=patch_size,
+            in_chans=in_ch, embed_dim=embed_dim,
+            depths=[swin_depth], num_heads=[num_heads],
+            window_size=window_size, mlp_ratio=mlp_ratio,
+            attn_drop_rate=attn_dropout
+        )
 
         # Bi-directional cross-attention
         self.rgb_to_dep = SwinTransformer(
-            img_size=(shape, shape), patch_size=1,
+            img_size=(shape, shape), patch_size=patch_size,
             in_chans=in_ch, embed_dim=embed_dim,
-            depths=[1], num_heads=[num_heads],
+            depths=[swin_depth], num_heads=[num_heads],
             window_size=11, mlp_ratio=mlp_ratio,
             attn_drop_rate=attn_dropout, cross_attention=True
         )
         self.dep_to_rgb = SwinTransformer(
-            img_size=(shape, shape), patch_size=1,
+            img_size=(shape, shape), patch_size=patch_size,
             in_chans=in_ch, embed_dim=embed_dim,
-            depths=[1], num_heads=[num_heads],
+            depths=[swin_depth], num_heads=[num_heads],
             window_size=11, mlp_ratio=mlp_ratio,
             attn_drop_rate=attn_dropout, cross_attention=True
         )
+
+        # Learnable fusion weights
+        self.alpha = nn.Parameter(torch.tensor(0.5))
+        self.beta = nn.Parameter(torch.tensor(0.5))
 
         # Post-fusion feedforward network
         hidden_dim = embed_dim * mlp_ratio
@@ -291,15 +295,15 @@ class Fusion(nn.Module):
     def forward(self, Ri, Ti):
 
         # Self-attention
-        # rgb_self = self.rgb_self(Ri)
-        # dep_self = self.dep_self(Ti)
+        rgb_self = self.rgb_self(Ri)
+        dep_self = self.dep_self(Ti)
 
         # Bi-directional cross-attention
         rgb_cross = self.rgb_to_dep(Ri, Ti)
         dep_cross = self.dep_to_rgb(Ti, Ri)
 
         # Weighted fusion
-        fused = rgb_cross + dep_cross
+        fused = rgb_self + dep_self + rgb_cross + dep_cross
 
         # Refinement
         # fused = self.norm(fused)
@@ -561,7 +565,7 @@ class BBSNetTransformerAttention(BaseModel):
         S = [88, 88, 44, 22, 11]
 
         # you can also set per stage (smaller patch for early layers)
-        P = [4, 4, 2, 1, 1]
+        P = [2, 2, 1, 1, 1]
         W = [11, 11, 11, 11, 11]
 
         # Replace FusionBlock2D with RGBDViTBlock
@@ -623,25 +627,21 @@ class BBSNetTransformerAttention(BaseModel):
         # layer1
         x1 = self.resnet.layer1(x)
         x1_depth = self.resnet_depth.layer1(x_depth)
-        # x1, x1_depth = self.rectify1(x1, x1_depth)
         x1 = x1 + self.cpa1(x1_depth)
 
         # layer2
         x2 = self.resnet.layer2(x1)
         x2_depth = self.resnet_depth.layer2(x1_depth)
-        # x2, x2_depth = self.rectify2(x2, x2_depth)
         x2 = x2 + self.cpa2(x2_depth)
 
         # layer3_1
         x3_1 = self.resnet.layer3_1(x2)
         x3_1_depth = self.resnet_depth.layer3_1(x2_depth)
-        # x3_1, x3_1_depth = self.rectify3(x3_1, x3_1_depth)
         x3_1 = x3_1 + self.cpa3(x3_1_depth)
 
         # layer4_1
         x4_1 = self.resnet.layer4_1(x3_1)
         x4_1_depth = self.resnet_depth.layer4_1(x3_1_depth)
-        # x4_1, x4_1_depth = self.rectify4(x4_1, x4_1_depth)
         x4_1 = x4_1 + self.cpa4(x4_1_depth)
 
         # =======================================================

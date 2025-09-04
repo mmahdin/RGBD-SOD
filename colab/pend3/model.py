@@ -242,39 +242,42 @@ class Fusion(nn.Module):
 
         # Channel reduction
         self.rgb_reduce = BasicConv2d(in_ch, embed_dim, 1)
-        self.dep_reduce = BasicConv2d(in_ch, embed_dim, 1)
 
         # Self-attention for each modality
-        # self.rgb_self = SwinTransformer(
-        #     img_size=(shape, shape), patch_size=patch_size,
-        #     in_chans=in_ch, embed_dim=embed_dim,
-        #     depths=[swin_depth], num_heads=[num_heads],
-        #     window_size=window_size, mlp_ratio=mlp_ratio,
-        #     attn_drop_rate=attn_dropout
-        # )
-        # self.dep_self = SwinTransformer(
-        #     img_size=(shape, shape), patch_size=patch_size,
-        #     in_chans=in_ch, embed_dim=embed_dim,
-        #     depths=[swin_depth], num_heads=[num_heads],
-        #     window_size=window_size, mlp_ratio=mlp_ratio,
-        #     attn_drop_rate=attn_dropout
-        # )
+        self.rgb_self = SwinTransformer(
+            img_size=(shape, shape), patch_size=patch_size,
+            in_chans=in_ch, embed_dim=embed_dim,
+            depths=[swin_depth], num_heads=[num_heads],
+            window_size=window_size, mlp_ratio=mlp_ratio,
+            attn_drop_rate=attn_dropout
+        )
+        self.dep_self = SwinTransformer(
+            img_size=(shape, shape), patch_size=patch_size,
+            in_chans=in_ch, embed_dim=embed_dim,
+            depths=[swin_depth], num_heads=[num_heads],
+            window_size=window_size, mlp_ratio=mlp_ratio,
+            attn_drop_rate=attn_dropout
+        )
 
         # Bi-directional cross-attention
         self.rgb_to_dep = SwinTransformer(
-            img_size=(shape, shape), patch_size=1,
-            in_chans=in_ch, embed_dim=embed_dim,
+            img_size=(shape//patch_size, shape//patch_size), patch_size=1,
+            in_chans=embed_dim, embed_dim=embed_dim,
             depths=[1], num_heads=[num_heads],
             window_size=11, mlp_ratio=mlp_ratio,
             attn_drop_rate=attn_dropout, cross_attention=True
         )
         self.dep_to_rgb = SwinTransformer(
-            img_size=(shape, shape), patch_size=1,
-            in_chans=in_ch, embed_dim=embed_dim,
+            img_size=(shape//patch_size, shape//patch_size), patch_size=1,
+            in_chans=embed_dim, embed_dim=embed_dim,
             depths=[1], num_heads=[num_heads],
             window_size=11, mlp_ratio=mlp_ratio,
             attn_drop_rate=attn_dropout, cross_attention=True
         )
+
+        # Learnable fusion weights
+        self.alpha = nn.Parameter(torch.tensor(0.5))
+        self.beta = nn.Parameter(torch.tensor(0.5))
 
         # Post-fusion feedforward network
         hidden_dim = embed_dim * mlp_ratio
@@ -286,32 +289,36 @@ class Fusion(nn.Module):
             nn.Dropout(dropout)
         )
 
-        # self.norm = nn.BatchNorm2d(embed_dim)
-
     def forward(self, Ri, Ti):
+        B, C, H, W = Ri.shape
 
-        # Self-attention
-        # rgb_self = self.rgb_self(Ri)
-        # dep_self = self.dep_self(Ti)
+        # 1) Self-attention
+        rgb_self = self.rgb_self(Ri)
+        dep_self = self.dep_self(Ti)
 
-        # Bi-directional cross-attention
-        rgb_cross = self.rgb_to_dep(Ri, Ti)
-        dep_cross = self.dep_to_rgb(Ti, Ri)
+        # 2) Bi-directional cross-attention
+        rgb_cross = self.rgb_to_dep(rgb_self, dep_self)
+        dep_cross = self.dep_to_rgb(dep_self, rgb_self)
 
-        # Weighted fusion
-        fused = rgb_cross + dep_cross
+        # 3) Adaptive fusion over {rgb_self, dep_self, rgb_cross, dep_cross}
+        fused_stack = torch.stack(
+            [rgb_self, dep_self, rgb_cross, dep_cross], dim=1)  # [B,4,C,h,w]
+        context = fused_stack.mean(dim=[3, 4])          # [B,4,C]
+        weights = torch.softmax(context.mean(dim=2), 1)  # [B,4]
+        fused = (fused_stack * weights[:, :, None,
+                 None, None]).sum(dim=1)  # [B,C,h,w]
 
-        # Refinement
-        # fused = self.norm(fused)
-        fused = self.mlp(fused)  # residual
+        # 4) Post-fusion refinement (residual)
+        fused = self.mlp(fused) + fused
 
-        fused = F.interpolate(fused, size=Ri.shape[-2:], mode='bilinear',
-                              align_corners=False)
+        # 5) Upsample to input size
+        fused = F.interpolate(fused, size=(
+            H, W), mode='bilinear', align_corners=False)
 
-        # Reduce channels
-        Ri = self.rgb_reduce(Ri)
+        # 6) Low-level RGB residual (same as your original intent)
+        Ri_low = self.rgb_reduce(Ri)  # [B,C,H,W]
+        return fused + Ri_low
 
-        return fused + Ri
 
 # ==================================================================
 
@@ -617,26 +624,31 @@ class BBSNetTransformerAttention(BaseModel):
         x_depth = self.resnet_depth.relu(x_depth)
         x_depth = self.resnet_depth.maxpool(x_depth)
 
+        # x, x_depth = self.rectify0(x, x_depth)
         x = x + self.cpa0(x_depth)
 
         # layer1
         x1 = self.resnet.layer1(x)
         x1_depth = self.resnet_depth.layer1(x_depth)
+        # x1, x1_depth = self.rectify1(x1, x1_depth)
         x1 = x1 + self.cpa1(x1_depth)
 
         # layer2
         x2 = self.resnet.layer2(x1)
         x2_depth = self.resnet_depth.layer2(x1_depth)
+        # x2, x2_depth = self.rectify2(x2, x2_depth)
         x2 = x2 + self.cpa2(x2_depth)
 
         # layer3_1
         x3_1 = self.resnet.layer3_1(x2)
         x3_1_depth = self.resnet_depth.layer3_1(x2_depth)
+        # x3_1, x3_1_depth = self.rectify3(x3_1, x3_1_depth)
         x3_1 = x3_1 + self.cpa3(x3_1_depth)
 
         # layer4_1
         x4_1 = self.resnet.layer4_1(x3_1)
         x4_1_depth = self.resnet_depth.layer4_1(x3_1_depth)
+        # x4_1, x4_1_depth = self.rectify4(x4_1, x4_1_depth)
         x4_1 = x4_1 + self.cpa4(x4_1_depth)
 
         # =======================================================

@@ -1,37 +1,37 @@
 {
-    "fullspatial_cpa": {
+    "fullspatial_cpa_stack_sl": {
         "NLPR": {
-            "path": "../pred/fullspatial_cpa/NLPR",
+            "path": "../pred/fullspatial_cpa_stack_sl/NLPR",
             "prefix": "",
             "suffix": ".png"
         },
         "SIP": {
-            "path": "../pred/fullspatial_cpa/SIP",
+            "path": "../pred/fullspatial_cpa_stack_sl/SIP",
             "prefix": "",
             "suffix": ".png"
         },
         "NJU2K": {
-            "path": "../pred/fullspatial_cpa/NJU2K",
+            "path": "../pred/fullspatial_cpa_stack_sl/NJU2K",
             "prefix": "",
             "suffix": ".png"
         },
         "DES": {
-            "path": "../pred/fullspatial_cpa/DES",
+            "path": "../pred/fullspatial_cpa_stack_sl/DES",
             "prefix": "",
             "suffix": ".png"
         },
         "LFSD": {
-            "path": "../pred/fullspatial_cpa/LFSD",
+            "path": "../pred/fullspatial_cpa_stack_sl/LFSD",
             "prefix": "",
             "suffix": ".png"
         },
         "STERE": {
-            "path": "../pred/fullspatial_cpa/STERE",
+            "path": "../pred/fullspatial_cpa_stack_sl/STERE",
             "prefix": "",
             "suffix": ".png"
         },
         "SSD": {
-            "path": "../pred/fullspatial_cpa/SSD",
+            "path": "../pred/fullspatial_cpa_stack_sl/SSD",
             "prefix": "",
             "suffix": ".png"
         }
