@@ -242,6 +242,7 @@ class Fusion(nn.Module):
 
         # Channel reduction
         self.rgb_reduce = BasicConv2d(in_ch, embed_dim, 1)
+        self.dep_reduce = BasicConv2d(in_ch, embed_dim, 1)
 
         # Self-attention for each modality
         self.rgb_self = SwinTransformer(
@@ -289,36 +290,32 @@ class Fusion(nn.Module):
             nn.Dropout(dropout)
         )
 
-    def forward(self, Ri, Ti):
-        B, C, H, W = Ri.shape
+        # self.norm = nn.BatchNorm2d(embed_dim)
 
-        # 1) Self-attention
+    def forward(self, Ri, Ti):
+
+        # Self-attention
         rgb_self = self.rgb_self(Ri)
         dep_self = self.dep_self(Ti)
 
-        # 2) Bi-directional cross-attention
+        # Bi-directional cross-attention
         rgb_cross = self.rgb_to_dep(rgb_self, dep_self)
         dep_cross = self.dep_to_rgb(dep_self, rgb_self)
 
-        # 3) Adaptive fusion over {rgb_self, dep_self, rgb_cross, dep_cross}
-        fused_stack = torch.stack(
-            [rgb_self, dep_self, rgb_cross, dep_cross], dim=1)  # [B,4,C,h,w]
-        context = fused_stack.mean(dim=[3, 4])          # [B,4,C]
-        weights = torch.softmax(context.mean(dim=2), 1)  # [B,4]
-        fused = (fused_stack * weights[:, :, None,
-                 None, None]).sum(dim=1)  # [B,C,h,w]
+        # Weighted fusion
+        fused = rgb_self + dep_self + rgb_cross + dep_cross
 
-        # 4) Post-fusion refinement (residual)
-        fused = self.mlp(fused) + fused
+        # Refinement
+        # fused = self.norm(fused)
+        fused = self.mlp(fused)  # residual
 
-        # 5) Upsample to input size
-        fused = F.interpolate(fused, size=(
-            H, W), mode='bilinear', align_corners=False)
+        fused = F.interpolate(fused, size=Ri.shape[-2:], mode='bilinear',
+                              align_corners=False)
 
-        # 6) Low-level RGB residual (same as your original intent)
-        Ri_low = self.rgb_reduce(Ri)  # [B,C,H,W]
-        return fused + Ri_low
+        # Reduce channels
+        Ri = self.rgb_reduce(Ri)
 
+        return fused + Ri
 
 # ==================================================================
 
@@ -630,25 +627,21 @@ class BBSNetTransformerAttention(BaseModel):
         # layer1
         x1 = self.resnet.layer1(x)
         x1_depth = self.resnet_depth.layer1(x_depth)
-        # x1, x1_depth = self.rectify1(x1, x1_depth)
         x1 = x1 + self.cpa1(x1_depth)
 
         # layer2
         x2 = self.resnet.layer2(x1)
         x2_depth = self.resnet_depth.layer2(x1_depth)
-        # x2, x2_depth = self.rectify2(x2, x2_depth)
         x2 = x2 + self.cpa2(x2_depth)
 
         # layer3_1
         x3_1 = self.resnet.layer3_1(x2)
         x3_1_depth = self.resnet_depth.layer3_1(x2_depth)
-        # x3_1, x3_1_depth = self.rectify3(x3_1, x3_1_depth)
         x3_1 = x3_1 + self.cpa3(x3_1_depth)
 
         # layer4_1
         x4_1 = self.resnet.layer4_1(x3_1)
         x4_1_depth = self.resnet_depth.layer4_1(x3_1_depth)
-        # x4_1, x4_1_depth = self.rectify4(x4_1, x4_1_depth)
         x4_1 = x4_1 + self.cpa4(x4_1_depth)
 
         # =======================================================

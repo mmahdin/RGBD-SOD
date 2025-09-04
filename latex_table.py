@@ -62,14 +62,17 @@ def csv_to_latex_table(csv_file_path, output_file_path=None):
 
     # Methods to include in the table
     selected_methods = [
-        'patchify_light_pos_embed',
+        # 'patchify_light_pos_embed',
         'bbsnet',
         # 'bbspaper',
         # 'best',
         # 'fullspatial',
-        'fullspatial_cpa',
-        'fullspatial_cpa_stack',
+        # 'fullspatial_cpa',
+        # 'fullspatial_cpa_stack',
         'fullspatial_cpa_stack_sl',
+        'fullspatial_cpa_stack_sl2',
+        'fullspatial_cpa_stack_sl3',
+        'fullspatial_cpa_sl',
 
 
     ]

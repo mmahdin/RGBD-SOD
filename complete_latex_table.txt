@@ -1,19 +1,19 @@
 Extracted data summary:
 
-patchify_light_pos_embed:
-  NJU2K: {'sm': 0.924, 'maxfmeasure': 0.927, 'maxem': 0.955, 'mae': 0.033}
-
 bbsnet:
   NJU2K: {'sm': 0.912, 'maxfmeasure': 0.913, 'maxem': 0.946, 'mae': 0.041}
 
-fullspatial_cpa:
-  NJU2K: {'sm': 0.914, 'maxfmeasure': 0.916, 'maxem': 0.948, 'mae': 0.04}
-
-fullspatial_cpa_stack:
-  NJU2K: {'sm': 0.915, 'maxfmeasure': 0.915, 'maxem': 0.948, 'mae': 0.04}
-
 fullspatial_cpa_stack_sl:
   NJU2K: {'sm': 0.911, 'maxfmeasure': 0.912, 'maxem': 0.945, 'mae': 0.037}
+
+fullspatial_cpa_stack_sl2:
+  NJU2K: {'sm': 0.912, 'maxfmeasure': 0.915, 'maxem': 0.947, 'mae': 0.036}
+
+fullspatial_cpa_stack_sl3:
+  NJU2K: {'sm': 0.915, 'maxfmeasure': 0.918, 'maxem': 0.949, 'mae': 0.035}
+
+fullspatial_cpa_sl:
+  NJU2K: {'sm': 0.91, 'maxfmeasure': 0.912, 'maxem': 0.944, 'mae': 0.038}
 
 ================================================================================
 
@@ -26,49 +26,49 @@ LaTeX Table:
 	\scriptsize
 	\begin{tabular}{c|c|ccccc}
 		\hline
-		داده & معیار & \rotatebox{90}{\lr{patchify_light_pos_embed}} & \rotatebox{90}{\lr{bbsnet}} & \rotatebox{90}{\lr{fullspatial_cpa}} & \rotatebox{90}{\lr{fullspatial_cpa_stack}} & \rotatebox{90}{\lr{fullspatial_cpa_stack_sl}} \\
+		داده & معیار & \rotatebox{90}{\lr{bbsnet}} & \rotatebox{90}{\lr{fullspatial_cpa_stack_sl}} & \rotatebox{90}{\lr{fullspatial_cpa_stack_sl2}} & \rotatebox{90}{\lr{fullspatial_cpa_stack_sl3}} & \rotatebox{90}{\lr{fullspatial_cpa_sl}} \\
 		\hline
 		\multirow{4}{*}{\lr{NLPR}} 
-		& $S_{\alpha}\uparrow$ & $0.928$ & \cellcolor{green!25} $0.930$ & $0.922$ & $0.929$ & $0.923$ \\
-				& $\text{\lr{maxF}}_{\beta}\uparrow$ & $0.915$ & \cellcolor{green!25} $0.918$ & $0.907$ & \cellcolor{green!25} $0.918$ & $0.914$ \\
-				& $\text{\lr{maxE}}_{\xi}\uparrow$ & $0.958$ & \cellcolor{green!25} $0.964$ & $0.957$ & \cellcolor{green!25} $0.964$ & $0.960$ \\
-				& $M\downarrow$ & $0.025$ & $0.024$ & $0.027$ & \cellcolor{green!25} $0.023$ & \cellcolor{green!25} $0.023$ \\
+		& $S_{\alpha}\uparrow$ & \cellcolor{green!25} $0.930$ & $0.923$ & $0.924$ & $0.926$ & $0.921$ \\
+				& $\text{\lr{maxF}}_{\beta}\uparrow$ & \cellcolor{green!25} $0.918$ & $0.914$ & $0.916$ & \cellcolor{green!25} $0.918$ & $0.912$ \\
+				& $\text{\lr{maxE}}_{\xi}\uparrow$ & \cellcolor{green!25} $0.964$ & $0.960$ & $0.961$ & \cellcolor{green!25} $0.964$ & $0.957$ \\
+				& $M\downarrow$ & $0.024$ & $0.023$ & $0.023$ & \cellcolor{green!25} $0.022$ & $0.024$ \\
 		\hline
 		\multirow{4}{*}{\lr{SIP}} 
-		& $S_{\alpha}\uparrow$ & $0.864$ & $0.884$ & \cellcolor{green!25} $0.887$ & $0.878$ & $0.878$ \\
-				& $\text{\lr{maxF}}_{\beta}\uparrow$ & $0.864$ & $0.890$ & \cellcolor{green!25} $0.895$ & $0.884$ & $0.886$ \\
-				& $\text{\lr{maxE}}_{\xi}\uparrow$ & $0.910$ & $0.925$ & \cellcolor{green!25} $0.930$ & $0.923$ & $0.922$ \\
-				& $M\downarrow$ & $0.059$ & $0.054$ & \cellcolor{green!25} $0.051$ & $0.056$ & \cellcolor{green!25} $0.051$ \\
+		& $S_{\alpha}\uparrow$ & $0.884$ & $0.878$ & $0.877$ & $0.881$ & \cellcolor{green!25} $0.885$ \\
+				& $\text{\lr{maxF}}_{\beta}\uparrow$ & $0.890$ & $0.886$ & $0.887$ & $0.890$ & \cellcolor{green!25} $0.892$ \\
+				& $\text{\lr{maxE}}_{\xi}\uparrow$ & $0.925$ & $0.922$ & $0.922$ & $0.926$ & \cellcolor{green!25} $0.929$ \\
+				& $M\downarrow$ & $0.054$ & $0.051$ & $0.051$ & $0.049$ & \cellcolor{green!25} $0.047$ \\
 		\hline
 		\multirow{4}{*}{\lr{NJU2K}} 
-		& $S_{\alpha}\uparrow$ & \cellcolor{green!25} $0.924$ & $0.912$ & $0.914$ & $0.915$ & $0.911$ \\
-				& $\text{\lr{maxF}}_{\beta}\uparrow$ & \cellcolor{green!25} $0.927$ & $0.913$ & $0.916$ & $0.915$ & $0.912$ \\
-				& $\text{\lr{maxE}}_{\xi}\uparrow$ & \cellcolor{green!25} $0.955$ & $0.946$ & $0.948$ & $0.948$ & $0.945$ \\
-				& $M\downarrow$ & \cellcolor{green!25} $0.033$ & $0.041$ & $0.040$ & $0.040$ & $0.037$ \\
+		& $S_{\alpha}\uparrow$ & $0.912$ & $0.911$ & $0.912$ & \cellcolor{green!25} $0.915$ & $0.910$ \\
+				& $\text{\lr{maxF}}_{\beta}\uparrow$ & $0.913$ & $0.912$ & $0.915$ & \cellcolor{green!25} $0.918$ & $0.912$ \\
+				& $\text{\lr{maxE}}_{\xi}\uparrow$ & $0.946$ & $0.945$ & $0.947$ & \cellcolor{green!25} $0.949$ & $0.944$ \\
+				& $M\downarrow$ & $0.041$ & $0.037$ & $0.036$ & \cellcolor{green!25} $0.035$ & $0.038$ \\
 		\hline
 		\multirow{4}{*}{\lr{DES}} 
-		& $S_{\alpha}\uparrow$ & $0.918$ & $0.926$ & $0.928$ & $0.933$ & \cellcolor{green!25} $0.935$ \\
-				& $\text{\lr{maxF}}_{\beta}\uparrow$ & $0.910$ & $0.919$ & $0.918$ & $0.924$ & \cellcolor{green!25} $0.933$ \\
-				& $\text{\lr{maxE}}_{\xi}\uparrow$ & $0.956$ & $0.959$ & $0.965$ & $0.968$ & \cellcolor{green!25} $0.972$ \\
-				& $M\downarrow$ & $0.024$ & $0.023$ & $0.023$ & $0.021$ & \cellcolor{green!25} $0.017$ \\
+		& $S_{\alpha}\uparrow$ & $0.926$ & \cellcolor{green!25} $0.935$ & $0.934$ & $0.922$ & $0.929$ \\
+				& $\text{\lr{maxF}}_{\beta}\uparrow$ & $0.919$ & \cellcolor{green!25} $0.933$ & $0.932$ & $0.919$ & $0.927$ \\
+				& $\text{\lr{maxE}}_{\xi}\uparrow$ & $0.959$ & \cellcolor{green!25} $0.972$ & $0.969$ & $0.955$ & $0.967$ \\
+				& $M\downarrow$ & $0.023$ & \cellcolor{green!25} $0.017$ & $0.018$ & $0.021$ & $0.019$ \\
 		\hline
 		\multirow{4}{*}{\lr{LFSD}} 
-		& $S_{\alpha}\uparrow$ & \cellcolor{green!25} $0.858$ & $0.849$ & $0.851$ & $0.850$ & $0.840$ \\
-				& $\text{\lr{maxF}}_{\beta}\uparrow$ & $0.847$ & $0.844$ & \cellcolor{green!25} $0.850$ & \cellcolor{green!25} $0.850$ & $0.834$ \\
-				& $\text{\lr{maxE}}_{\xi}\uparrow$ & \cellcolor{green!25} $0.894$ & $0.887$ & $0.893$ & $0.891$ & $0.880$ \\
-				& $M\downarrow$ & \cellcolor{green!25} $0.075$ & $0.081$ & $0.080$ & $0.083$ & $0.079$ \\
+		& $S_{\alpha}\uparrow$ & $0.849$ & $0.840$ & $0.843$ & $0.852$ & \cellcolor{green!25} $0.854$ \\
+				& $\text{\lr{maxF}}_{\beta}\uparrow$ & $0.844$ & $0.834$ & $0.837$ & \cellcolor{green!25} $0.856$ & \cellcolor{green!25} $0.856$ \\
+				& $\text{\lr{maxE}}_{\xi}\uparrow$ & $0.887$ & $0.880$ & $0.876$ & \cellcolor{green!25} $0.895$ & $0.894$ \\
+				& $M\downarrow$ & $0.081$ & $0.079$ & $0.077$ & $0.075$ & \cellcolor{green!25} $0.073$ \\
 		\hline
 		\multirow{4}{*}{\lr{STERE}} 
-		& $S_{\alpha}\uparrow$ & \cellcolor{green!25} $0.913$ & $0.905$ & $0.903$ & $0.905$ & $0.905$ \\
-				& $\text{\lr{maxF}}_{\beta}\uparrow$ & \cellcolor{green!25} $0.908$ & $0.904$ & $0.898$ & $0.902$ & $0.904$ \\
-				& $\text{\lr{maxE}}_{\xi}\uparrow$ & \cellcolor{green!25} $0.947$ & $0.942$ & $0.940$ & $0.942$ & $0.944$ \\
-				& $M\downarrow$ & \cellcolor{green!25} $0.038$ & $0.042$ & $0.042$ & $0.042$ & \cellcolor{green!25} $0.038$ \\
+		& $S_{\alpha}\uparrow$ & $0.905$ & $0.905$ & \cellcolor{green!25} $0.906$ & $0.902$ & $0.902$ \\
+				& $\text{\lr{maxF}}_{\beta}\uparrow$ & $0.904$ & $0.904$ & \cellcolor{green!25} $0.906$ & $0.902$ & $0.902$ \\
+				& $\text{\lr{maxE}}_{\xi}\uparrow$ & $0.942$ & $0.944$ & \cellcolor{green!25} $0.945$ & $0.942$ & $0.941$ \\
+				& $M\downarrow$ & $0.042$ & $0.038$ & \cellcolor{green!25} $0.037$ & $0.040$ & $0.038$ \\
 		\hline
 		\multirow{4}{*}{\lr{SSD}} 
-		& $S_{\alpha}\uparrow$ & $0.867$ & \cellcolor{green!25} $0.868$ & $0.866$ & $0.862$ & $0.857$ \\
-				& $\text{\lr{maxF}}_{\beta}\uparrow$ & $0.838$ & \cellcolor{green!25} $0.845$ & \cellcolor{green!25} $0.845$ & $0.836$ & $0.834$ \\
-				& $\text{\lr{maxE}}_{\xi}\uparrow$ & \cellcolor{green!25} $0.908$ & $0.905$ & $0.902$ & $0.906$ & $0.907$ \\
-				& $M\downarrow$ & \cellcolor{green!25} $0.051$ & $0.053$ & $0.054$ & $0.055$ & $0.054$ \\
+		& $S_{\alpha}\uparrow$ & \cellcolor{green!25} $0.868$ & $0.857$ & $0.856$ & $0.857$ & $0.859$ \\
+				& $\text{\lr{maxF}}_{\beta}\uparrow$ & $0.845$ & $0.834$ & $0.834$ & $0.838$ & \cellcolor{green!25} $0.850$ \\
+				& $\text{\lr{maxE}}_{\xi}\uparrow$ & $0.905$ & $0.907$ & $0.908$ & $0.902$ & \cellcolor{green!25} $0.917$ \\
+				& $M\downarrow$ & $0.053$ & $0.054$ & $0.053$ & $0.056$ & \cellcolor{green!25} $0.049$ \\
 		\hline
 	\end{tabular}
 	\caption{مقایسه روش‌های مختلف روی مجموعه‌داده‌های مختلف. بهترین نتایج برای هر معیار هایلایت شده‌اند.}

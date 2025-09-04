@@ -1,9 +1,9 @@
 from data import get_loader, test_dataset
-from pend4.options import opt
+from pend6.options import opt
 import torch.backends.cudnn as cudnn
 import logging
 from tensorboardX import SummaryWriter
-from pend4.model import BBSNetTransformerAttention as BBSNet
+from pend6.model import BBSNetTransformerAttention as BBSNet
 # from models.BBSNet_model import BBSNetSwin as BBSNet
 from torchvision.utils import make_grid
 from datetime import datetime
@@ -173,7 +173,7 @@ def train(train_loader, model, optimizer, epoch, save_path, pending_unembed=None
 
         loss1 = structure_loss(s1, gts)
         loss2 = structure_loss(s2, gts)
-        loss = 0.7*loss1 + 0.9*loss2
+        loss = loss1 + loss2
         # loss1 = CE(s1, gts)
         # loss2 = CE(s2, gts)
         # loss = loss1 + loss2
@@ -286,7 +286,7 @@ def clip_gradient(optimizer, grad_clip):
 def adjust_lr(optimizer, init_lr, epoch, decay_rate=0.1, decay_epoch=30):
     decay = decay_rate ** (epoch // decay_epoch)
     for param_group in optimizer.param_groups:
-        param_group['lr'] = init_lr * (0.1**(epoch//30))
+        param_group['lr'] = init_lr * (0.1**(epoch//40))
         lr = param_group['lr']
     return lr
 

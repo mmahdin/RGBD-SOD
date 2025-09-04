@@ -1,7 +1,7 @@
 import argparse
 import sys
 
-version = 'gpt'
+version = 'fullspatial_cpa_sl'
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--epoch', type=int, default=200, help='epoch number')

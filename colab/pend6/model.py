@@ -568,7 +568,7 @@ class BBSNetTransformerAttention(BaseModel):
         S = [88, 88, 44, 22, 11]
 
         # you can also set per stage (smaller patch for early layers)
-        P = [4, 4, 2, 1, 1]
+        P = [8, 8, 4, 1, 1]
         W = [11, 11, 11, 11, 11]
 
         # Replace FusionBlock2D with RGBDViTBlock

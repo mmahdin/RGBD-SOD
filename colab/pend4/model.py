@@ -242,8 +242,9 @@ class Fusion(nn.Module):
 
         # Channel reduction
         self.rgb_reduce = BasicConv2d(in_ch, embed_dim, 1)
+        self.dep_reduce = BasicConv2d(in_ch, embed_dim, 1)
 
-        # Self-attention
+        # Self-attention for each modality
         self.rgb_self = SwinTransformer(
             img_size=(shape, shape), patch_size=patch_size,
             in_chans=in_ch, embed_dim=embed_dim,
@@ -259,36 +260,27 @@ class Fusion(nn.Module):
             attn_drop_rate=attn_dropout
         )
 
-        # Cross-attention
+        # Bi-directional cross-attention
         self.rgb_to_dep = SwinTransformer(
-            img_size=(shape // patch_size, shape // patch_size), patch_size=1,
+            img_size=(shape//patch_size, shape//patch_size), patch_size=1,
             in_chans=embed_dim, embed_dim=embed_dim,
             depths=[1], num_heads=[num_heads],
             window_size=11, mlp_ratio=mlp_ratio,
             attn_drop_rate=attn_dropout, cross_attention=True
         )
         self.dep_to_rgb = SwinTransformer(
-            img_size=(shape // patch_size, shape // patch_size), patch_size=1,
+            img_size=(shape//patch_size, shape//patch_size), patch_size=1,
             in_chans=embed_dim, embed_dim=embed_dim,
             depths=[1], num_heads=[num_heads],
             window_size=11, mlp_ratio=mlp_ratio,
             attn_drop_rate=attn_dropout, cross_attention=True
         )
 
-        # Squeeze-and-Excitation (channel attention)
-        self.se_conv = nn.Conv2d(embed_dim * 4, embed_dim * 4, 1)
-
-        # Dim reduction after concat
-        self.reduce_conv = nn.Conv2d(embed_dim * 4, embed_dim, 1)
-
-        # Adaptive gating
-        self.gate_conv = nn.Conv2d(embed_dim, embed_dim, 1)
-
         # Learnable fusion weights
         self.alpha = nn.Parameter(torch.tensor(0.5))
         self.beta = nn.Parameter(torch.tensor(0.5))
 
-        # Post-fusion MLP
+        # Post-fusion feedforward network
         hidden_dim = embed_dim * mlp_ratio
         self.mlp = nn.Sequential(
             nn.Conv2d(embed_dim, hidden_dim, 1),
@@ -298,43 +290,32 @@ class Fusion(nn.Module):
             nn.Dropout(dropout)
         )
 
+        # self.norm = nn.BatchNorm2d(embed_dim)
+
     def forward(self, Ri, Ti):
-        # Self-attention features
+
+        # Self-attention
         rgb_self = self.rgb_self(Ri)
         dep_self = self.dep_self(Ti)
 
-        # Cross-attention features
+        # Bi-directional cross-attention
         rgb_cross = self.rgb_to_dep(rgb_self, dep_self)
         dep_cross = self.dep_to_rgb(dep_self, rgb_self)
 
-        # Concatenate all modality features
-        fused = torch.cat([rgb_self, dep_self, rgb_cross, dep_cross], dim=1)
+        # Weighted fusion
+        fused = rgb_self + dep_self + rgb_cross + dep_cross
 
-        # Channel attention (SE)
-        se = F.adaptive_avg_pool2d(fused, 1)
-        se = torch.sigmoid(self.se_conv(se))
-        fused = fused * se
+        # Refinement
+        # fused = self.norm(fused)
+        fused = self.mlp(fused)  # residual
 
-        # Reduce to embed_dim
-        fused = self.reduce_conv(fused)
+        fused = F.interpolate(fused, size=Ri.shape[-2:], mode='bilinear',
+                              align_corners=False)
 
-        # Adaptive gating between RGB and Depth
-        gate = torch.sigmoid(self.gate_conv(fused))
-        fused = gate * rgb_self + (1 - gate) * dep_self + rgb_cross + dep_cross
-
-        # Refinement with MLP
-        fused = self.mlp(fused)
-
-        # Upsample to match input size
-        fused = F.interpolate(
-            fused, size=Ri.shape[-2:], mode='bilinear', align_corners=False)
-
-        # Residual RGB shortcut
+        # Reduce channels
         Ri = self.rgb_reduce(Ri)
-        fused = fused + Ri
 
-        return fused
-
+        return fused + Ri
 
 # ==================================================================
 
@@ -619,12 +600,6 @@ class BBSNetTransformerAttention(BaseModel):
         self.rfb1_2 = GCM(embed_dim[1], channel)
         self.rfb5_2 = GCM(embed_dim[2], channel)
 
-        # self.rectify0 = FeatureRectifyModule(C[0])
-        # self.rectify1 = FeatureRectifyModule(C[1])
-        # self.rectify2 = FeatureRectifyModule(C[2])
-        # self.rectify3 = FeatureRectifyModule(C[3])
-        # self.rectify4 = FeatureRectifyModule(C[4])
-
         self.cpa0 = CPA(C[0])
         self.cpa1 = CPA(C[1])
         self.cpa2 = CPA(C[2])
@@ -652,25 +627,21 @@ class BBSNetTransformerAttention(BaseModel):
         # layer1
         x1 = self.resnet.layer1(x)
         x1_depth = self.resnet_depth.layer1(x_depth)
-        # x1, x1_depth = self.rectify1(x1, x1_depth)
         x1 = x1 + self.cpa1(x1_depth)
 
         # layer2
         x2 = self.resnet.layer2(x1)
         x2_depth = self.resnet_depth.layer2(x1_depth)
-        # x2, x2_depth = self.rectify2(x2, x2_depth)
         x2 = x2 + self.cpa2(x2_depth)
 
         # layer3_1
         x3_1 = self.resnet.layer3_1(x2)
         x3_1_depth = self.resnet_depth.layer3_1(x2_depth)
-        # x3_1, x3_1_depth = self.rectify3(x3_1, x3_1_depth)
         x3_1 = x3_1 + self.cpa3(x3_1_depth)
 
         # layer4_1
         x4_1 = self.resnet.layer4_1(x3_1)
         x4_1_depth = self.resnet_depth.layer4_1(x3_1_depth)
-        # x4_1, x4_1_depth = self.rectify4(x4_1, x4_1_depth)
         x4_1 = x4_1 + self.cpa4(x4_1_depth)
 
         # =======================================================
