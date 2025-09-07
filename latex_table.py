@@ -29,7 +29,6 @@ def csv_to_latex_table(csv_file_path, output_file_path=None):
     # - Each dataset has 16 metrics: sm, wfm, mae, maxfmeasure, avgfmeasure, adpfmeasure, maxem, avgem, adpem, maxprecision, avgprecision, adpprecision, maxrecall, avgrecall, adprecall, msiou
 
     # Define the datasets in order and their starting column indices
-    # Based on your CSV: nlpr starts at column 1, sip at 17, nju2k at 33, des at 49, lfsd at 65, stere at 81, ssd at 97
     datasets_info = {
         'NLPR': {'start_col': 1, 'csv_name': 'nlpr'},
         'SIP': {'start_col': 17, 'csv_name': 'sip'},
@@ -41,11 +40,6 @@ def csv_to_latex_table(csv_file_path, output_file_path=None):
     }
 
     # Define the metrics in order (16 metrics per dataset)
-    # metric_names = ['sm', 'wfm', 'mae', 'maxfmeasure', 'avgfmeasure', 'adpfmeasure',
-    #                 'maxem', 'avgem', 'adpem', 'maxprecision', 'avgprecision', 'adpprecision',
-    #                 'maxrecall', 'avgrecall', 'adprecall', 'msiou']
-
-    # Map metric indices to what we need for the table
     needed_metrics_indices = {
         'sm': 0,           # S_alpha
         'maxfmeasure': 3,  # maxF_beta
@@ -60,22 +54,29 @@ def csv_to_latex_table(csv_file_path, output_file_path=None):
         'mae': ('$M\\downarrow$', False)
     }
 
-    # Methods to include in the table
-    selected_methods = [
-        # 'patchify_light_pos_embed',
-        'bbsnet',
-        # 'bbspaper',
-        # 'best',
-        # 'fullspatial',
-        # 'fullspatial_cpa',
-        # 'fullspatial_cpa_stack',
-        'fullspatial_cpa_stack_sl',
-        'fullspatial_cpa_stack_sl2',
-        'fullspatial_cpa_stack_sl3',
-        'fullspatial_cpa_sl',
+    # Dictionary to map method names to display names
+    method_display_names = {
+        'bbsnet': 'مدل مرجع',
+        # 'fullspatial_cpa': 'مدل ۱',
+        # 'fullspatial_cpa_sl': 'مدل ۲',
+        # 'fullspatial_cpa_sl_p4': 'مدل ۳',
+        # 'fullspatial_cpa_stack': 'مدل ۴',
+        # 'fullspatial_cpa_stack_sl': 'مدل ۵',
+        # 'fullspatial_cpa_stack_sl3': 'مدل ۶',
+        'fullspatial_cpa_stack_sl_p8': 'مدل ۷',
+        # 'patchify_sl': 'مدل ۸',
+        # 'best': 'مدل 9',
+        # 'fullspatial_stack_sl_cross': 'مدل ۱۰',
+        # 'fullspatial_stack_sl_depth3': 'مدل ۱۱',
+        # 'fullspatial_cpa_stack_sl_p4_ape': 'مدل ۱۲',
+        # 'fullspatial_stack_sl_depth3_ape': 'مدل ۱۳',
+        # 'fullspatial_stack_sl_depth4': 'مدل ۱۴',
 
+        # Add more mappings as needed
+    }
 
-    ]
+    # Generate selected_methods from the dictionary keys
+    selected_methods = list(method_display_names.keys())
 
     # Extract data for each method
     methods_data = {}
@@ -113,13 +114,17 @@ def csv_to_latex_table(csv_file_path, output_file_path=None):
 \\begin{table}[ht]
 \t\\centering
 \t\\scriptsize
-\t\\begin{tabular}{c|c|ccccc}
-\t\t\\hline
-\t\tداده & معیار"""
+\t\\begin{tabular}{c|c|"""
 
-    # Add method column headers
+    # Dynamically create the column specification based on number of methods
+    # Add 'c' for each method column
+    latex_table += "c" * len(selected_methods)
+    latex_table += "}\n\t\t\\hline\n\t\tداده & معیار"
+
+    # Add method column headers with display names
     for method in selected_methods:
-        latex_table += f" & \\rotatebox{{90}}{{\\lr{{{method}}}}}"
+        display_name = method_display_names[method]
+        latex_table += f" & {display_name}"
 
     latex_table += " \\\\\n\t\t\\hline\n"
 
@@ -196,8 +201,9 @@ def csv_to_latex_table(csv_file_path, output_file_path=None):
 
     return latex_table
 
-
 # Example usage
+
+
 def main():
     csv_file = "PySODEvalToolkit-master/output/results.txt"  # Your CSV file
 
@@ -209,3 +215,7 @@ def main():
     latex_output = csv_to_latex_table(csv_file, "complete_latex_table.txt")
 
     print("Done! Check the output file for the complete LaTeX table.")
+
+
+if __name__ == "__main__":
+    main()

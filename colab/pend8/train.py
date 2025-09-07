@@ -1,9 +1,9 @@
 from data import get_loader, test_dataset
-from pend3.options import opt
+from pend8.options import opt
 import torch.backends.cudnn as cudnn
 import logging
 from tensorboardX import SummaryWriter
-from pend3.model import BBSNetTransformerAttention as BBSNet
+from pend8.model import BBSNetTransformerAttention as BBSNet
 # from models.BBSNet_model import BBSNetSwin as BBSNet
 from torchvision.utils import make_grid
 from datetime import datetime
@@ -286,7 +286,7 @@ def clip_gradient(optimizer, grad_clip):
 def adjust_lr(optimizer, init_lr, epoch, decay_rate=0.1, decay_epoch=30):
     decay = decay_rate ** (epoch // decay_epoch)
     for param_group in optimizer.param_groups:
-        param_group['lr'] = init_lr * (0.1**(epoch//35))
+        param_group['lr'] = init_lr * (0.1**(epoch//30))
         lr = param_group['lr']
     return lr
 

@@ -1,7 +1,7 @@
 import argparse
 import sys
 
-version = 'patchify_sl'
+version = 'fullspatial_stack_sl_depth4'
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--epoch', type=int, default=200, help='epoch number')

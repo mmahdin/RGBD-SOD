@@ -1,37 +1,37 @@
 {
-    "fullspatial_cpa_sl": {
+    "fullspatial_stack_sl_depth4": {
         "NLPR": {
-            "path": "../pred/fullspatial_cpa_sl/NLPR",
+            "path": "../pred/fullspatial_stack_sl_depth4/NLPR",
             "prefix": "",
             "suffix": ".png"
         },
         "SIP": {
-            "path": "../pred/fullspatial_cpa_sl/SIP",
+            "path": "../pred/fullspatial_stack_sl_depth4/SIP",
             "prefix": "",
             "suffix": ".png"
         },
         "NJU2K": {
-            "path": "../pred/fullspatial_cpa_sl/NJU2K",
+            "path": "../pred/fullspatial_stack_sl_depth4/NJU2K",
             "prefix": "",
             "suffix": ".png"
         },
         "DES": {
-            "path": "../pred/fullspatial_cpa_sl/DES",
+            "path": "../pred/fullspatial_stack_sl_depth4/DES",
             "prefix": "",
             "suffix": ".png"
         },
         "LFSD": {
-            "path": "../pred/fullspatial_cpa_sl/LFSD",
+            "path": "../pred/fullspatial_stack_sl_depth4/LFSD",
             "prefix": "",
             "suffix": ".png"
         },
         "STERE": {
-            "path": "../pred/fullspatial_cpa_sl/STERE",
+            "path": "../pred/fullspatial_stack_sl_depth4/STERE",
             "prefix": "",
             "suffix": ".png"
         },
         "SSD": {
-            "path": "../pred/fullspatial_cpa_sl/SSD",
+            "path": "../pred/fullspatial_stack_sl_depth4/SSD",
             "prefix": "",
             "suffix": ".png"
         }
