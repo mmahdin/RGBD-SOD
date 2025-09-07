@@ -260,24 +260,20 @@ class Fusion(nn.Module):
         )
 
         # Bi-directional cross-attention
-        if shape//patch_size > 11:
-            d = 2
-        else:
-            d = 1
-        self.rgb_to_dep = SwinTransformer(
-            img_size=(shape//patch_size, shape//patch_size), patch_size=1,
-            in_chans=embed_dim, embed_dim=embed_dim,
-            depths=[d], num_heads=[num_heads],
-            window_size=11, mlp_ratio=mlp_ratio,
-            attn_drop_rate=attn_dropout, cross_attention=True
-        )
-        self.dep_to_rgb = SwinTransformer(
-            img_size=(shape//patch_size, shape//patch_size), patch_size=1,
-            in_chans=embed_dim, embed_dim=embed_dim,
-            depths=[d], num_heads=[num_heads],
-            window_size=11, mlp_ratio=mlp_ratio,
-            attn_drop_rate=attn_dropout, cross_attention=True
-        )
+        # self.rgb_to_dep = SwinTransformer(
+        #     img_size=(shape//patch_size, shape//patch_size), patch_size=1,
+        #     in_chans=embed_dim, embed_dim=embed_dim,
+        #     depths=[1], num_heads=[num_heads],
+        #     window_size=11, mlp_ratio=mlp_ratio,
+        #     attn_drop_rate=attn_dropout, cross_attention=True
+        # )
+        # self.dep_to_rgb = SwinTransformer(
+        #     img_size=(shape//patch_size, shape//patch_size), patch_size=1,
+        #     in_chans=embed_dim, embed_dim=embed_dim,
+        #     depths=[1], num_heads=[num_heads],
+        #     window_size=11, mlp_ratio=mlp_ratio,
+        #     attn_drop_rate=attn_dropout, cross_attention=True
+        # )
 
         # Learnable fusion weights
         self.alpha = nn.Parameter(torch.tensor(0.5))
@@ -301,27 +297,20 @@ class Fusion(nn.Module):
         dep_self = self.dep_self(Ti)
 
         # 2) Bi-directional cross-attention
-        rgb_cross = self.rgb_to_dep(rgb_self, dep_self)
-        dep_cross = self.dep_to_rgb(dep_self, rgb_self)
+        # rgb_cross = self.rgb_to_dep(rgb_self, dep_self)
+        # dep_cross = self.dep_to_rgb(dep_self, rgb_self)
 
-        # 3) Adaptive fusion over {rgb_self, dep_self, rgb_cross, dep_cross}
-        fused_stack = torch.stack(
-            [rgb_self, dep_self, rgb_cross, dep_cross], dim=1)  # [B,4,C,h,w]
-        context = fused_stack.mean(dim=[3, 4])          # [B,4,C]
-        weights = torch.softmax(context.mean(dim=2), 1)  # [B,4]
-        fused = (fused_stack * weights[:, :, None,
-                 None, None]).sum(dim=1)  # [B,C,h,w]
+        fused = rgb_self + dep_self
 
-        # 4) Post-fusion refinement (residual)
-        fused = self.mlp(fused) + fused
+        fused = self.mlp(fused)  # residual
 
-        # 5) Upsample to input size
-        fused = F.interpolate(fused, size=(
-            H, W), mode='bilinear', align_corners=False)
+        fused = F.interpolate(fused, size=Ri.shape[-2:], mode='bilinear',
+                              align_corners=False)
 
-        # 6) Low-level RGB residual (same as your original intent)
-        Ri_low = self.rgb_reduce(Ri)  # [B,C,H,W]
-        return fused + Ri_low
+        # Reduce channels
+        Ri = self.rgb_reduce(Ri)
+
+        return fused + Ri
 
 
 # ==================================================================

@@ -1,9 +1,9 @@
 from data import get_loader, test_dataset
-from pend18.options import opt
+from pend22.options import opt
 import torch.backends.cudnn as cudnn
 import logging
 from tensorboardX import SummaryWriter
-from pend18.model import BBSNetTransformerAttention as BBSNet
+from pend22.model import BBSNetTransformerAttention as BBSNet
 # from models.BBSNet_model import BBSNetSwin as BBSNet
 from torchvision.utils import make_grid
 from datetime import datetime

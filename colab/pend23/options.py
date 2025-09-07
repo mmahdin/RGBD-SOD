@@ -1,7 +1,7 @@
 import argparse
 import sys
 
-version = 'fullspatial_stack_sl_depth3_c2'
+version = 'noc_nostack'
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--epoch', type=int, default=200, help='epoch number')

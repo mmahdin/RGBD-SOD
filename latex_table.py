@@ -57,21 +57,16 @@ def csv_to_latex_table(csv_file_path, output_file_path=None):
     # Dictionary to map method names to display names
     method_display_names = {
         'bbsnet': 'مدل مرجع',
-        # 'fullspatial_cpa': 'مدل ۱',
-        # 'fullspatial_cpa_sl': 'مدل ۲',
-        # 'fullspatial_cpa_sl_p4': 'مدل ۳',
-        # 'fullspatial_cpa_stack': 'مدل ۴',
-        # 'fullspatial_cpa_stack_sl': 'مدل ۵',
-        # 'fullspatial_cpa_stack_sl3': 'مدل ۶',
-        'fullspatial_cpa_stack_sl_p8': 'مدل ۷',
-        # 'patchify_sl': 'مدل ۸',
-        # 'best': 'مدل 9',
-        # 'fullspatial_stack_sl_cross': 'مدل ۱۰',
-        # 'fullspatial_stack_sl_depth3': 'مدل ۱۱',
-        # 'fullspatial_cpa_stack_sl_p4_ape': 'مدل ۱۲',
-        # 'fullspatial_stack_sl_depth3_ape': 'مدل ۱۳',
-        # 'fullspatial_stack_sl_depth4': 'مدل ۱۴',
-
+        # 'fullspatial_cpa_stack_sl': 'مدل ۱',
+        # 'fullspatial_cpa_stack_sl3': 'مدل ۲',
+        # 'fullspatial_stack_sl_depth3': 'مدل ۳',
+        # 'fullspatial_cpa_stack_sl_p8': 'مدل ۴',
+        # 'patchify_sl': 'مدل ۵',
+        # 'fullspatial_stack_sl_cross': 'مدل ۶',
+        # 'fullspatial_stack_sl_depth3_noc': 'مدل ۷',
+        'combined': 'مدل ۸',
+        # 'no_dem_no_cross': 'مدل ۹',
+        # 'p8_noc': 'مدل ۱۰',
         # Add more mappings as needed
     }
 

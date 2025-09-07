@@ -3,8 +3,8 @@ Extracted data summary:
 bbsnet:
   NJU2K: {'sm': 0.912, 'maxfmeasure': 0.913, 'maxem': 0.946, 'mae': 0.041}
 
-fullspatial_cpa_stack_sl_p8:
-  NJU2K: {'sm': 0.913, 'maxfmeasure': 0.917, 'maxem': 0.948, 'mae': 0.036}
+combined:
+  NJU2K: {'sm': 0.911, 'maxfmeasure': 0.915, 'maxem': 0.946, 'mae': 0.037}
 
 ================================================================================
 
@@ -17,49 +17,49 @@ LaTeX Table:
 	\scriptsize
 	\begin{tabular}{c|c|cc}
 		\hline
-		داده & معیار & مدل مرجع & مدل ۷ \\
+		داده & معیار & مدل مرجع & مدل ۸ \\
 		\hline
 		\multirow{4}{*}{\lr{NLPR}} 
-		& $S_{\alpha}\uparrow$ & \cellcolor{green!25} $0.930$ & $0.925$ \\
+		& $S_{\alpha}\uparrow$ & \cellcolor{green!25} $0.930$ & $0.927$ \\
 				& $\text{\lr{maxF}}_{\beta}\uparrow$ & \cellcolor{green!25} $0.918$ & \cellcolor{green!25} $0.918$ \\
-				& $\text{\lr{maxE}}_{\xi}\uparrow$ & \cellcolor{green!25} $0.964$ & $0.961$ \\
+				& $\text{\lr{maxE}}_{\xi}\uparrow$ & \cellcolor{green!25} $0.964$ & $0.962$ \\
 				& $M\downarrow$ & $0.024$ & \cellcolor{green!25} $0.022$ \\
 		\hline
 		\multirow{4}{*}{\lr{SIP}} 
-		& $S_{\alpha}\uparrow$ & \cellcolor{green!25} $0.884$ & $0.873$ \\
-				& $\text{\lr{maxF}}_{\beta}\uparrow$ & \cellcolor{green!25} $0.890$ & $0.886$ \\
-				& $\text{\lr{maxE}}_{\xi}\uparrow$ & \cellcolor{green!25} $0.925$ & $0.920$ \\
-				& $M\downarrow$ & $0.054$ & \cellcolor{green!25} $0.052$ \\
+		& $S_{\alpha}\uparrow$ & \cellcolor{green!25} $0.884$ & $0.879$ \\
+				& $\text{\lr{maxF}}_{\beta}\uparrow$ & \cellcolor{green!25} $0.890$ & \cellcolor{green!25} $0.890$ \\
+				& $\text{\lr{maxE}}_{\xi}\uparrow$ & $0.925$ & \cellcolor{green!25} $0.926$ \\
+				& $M\downarrow$ & $0.054$ & \cellcolor{green!25} $0.049$ \\
 		\hline
 		\multirow{4}{*}{\lr{NJU2K}} 
-		& $S_{\alpha}\uparrow$ & $0.912$ & \cellcolor{green!25} $0.913$ \\
-				& $\text{\lr{maxF}}_{\beta}\uparrow$ & $0.913$ & \cellcolor{green!25} $0.917$ \\
-				& $\text{\lr{maxE}}_{\xi}\uparrow$ & $0.946$ & \cellcolor{green!25} $0.948$ \\
-				& $M\downarrow$ & $0.041$ & \cellcolor{green!25} $0.036$ \\
+		& $S_{\alpha}\uparrow$ & \cellcolor{green!25} $0.912$ & $0.911$ \\
+				& $\text{\lr{maxF}}_{\beta}\uparrow$ & $0.913$ & \cellcolor{green!25} $0.915$ \\
+				& $\text{\lr{maxE}}_{\xi}\uparrow$ & \cellcolor{green!25} $0.946$ & \cellcolor{green!25} $0.946$ \\
+				& $M\downarrow$ & $0.041$ & \cellcolor{green!25} $0.037$ \\
 		\hline
 		\multirow{4}{*}{\lr{DES}} 
-		& $S_{\alpha}\uparrow$ & $0.926$ & \cellcolor{green!25} $0.938$ \\
-				& $\text{\lr{maxF}}_{\beta}\uparrow$ & $0.919$ & \cellcolor{green!25} $0.935$ \\
-				& $\text{\lr{maxE}}_{\xi}\uparrow$ & $0.959$ & \cellcolor{green!25} $0.974$ \\
-				& $M\downarrow$ & $0.023$ & \cellcolor{green!25} $0.017$ \\
+		& $S_{\alpha}\uparrow$ & $0.926$ & \cellcolor{green!25} $0.927$ \\
+				& $\text{\lr{maxF}}_{\beta}\uparrow$ & $0.919$ & \cellcolor{green!25} $0.927$ \\
+				& $\text{\lr{maxE}}_{\xi}\uparrow$ & $0.959$ & \cellcolor{green!25} $0.964$ \\
+				& $M\downarrow$ & $0.023$ & \cellcolor{green!25} $0.019$ \\
 		\hline
 		\multirow{4}{*}{\lr{LFSD}} 
-		& $S_{\alpha}\uparrow$ & \cellcolor{green!25} $0.849$ & $0.847$ \\
-				& $\text{\lr{maxF}}_{\beta}\uparrow$ & $0.844$ & \cellcolor{green!25} $0.845$ \\
-				& $\text{\lr{maxE}}_{\xi}\uparrow$ & $0.887$ & \cellcolor{green!25} $0.893$ \\
-				& $M\downarrow$ & $0.081$ & \cellcolor{green!25} $0.072$ \\
+		& $S_{\alpha}\uparrow$ & $0.849$ & \cellcolor{green!25} $0.856$ \\
+				& $\text{\lr{maxF}}_{\beta}\uparrow$ & $0.844$ & \cellcolor{green!25} $0.863$ \\
+				& $\text{\lr{maxE}}_{\xi}\uparrow$ & $0.887$ & \cellcolor{green!25} $0.903$ \\
+				& $M\downarrow$ & $0.081$ & \cellcolor{green!25} $0.071$ \\
 		\hline
 		\multirow{4}{*}{\lr{STERE}} 
-		& $S_{\alpha}\uparrow$ & \cellcolor{green!25} $0.905$ & $0.903$ \\
-				& $\text{\lr{maxF}}_{\beta}\uparrow$ & \cellcolor{green!25} $0.904$ & $0.902$ \\
-				& $\text{\lr{maxE}}_{\xi}\uparrow$ & \cellcolor{green!25} $0.942$ & \cellcolor{green!25} $0.942$ \\
-				& $M\downarrow$ & $0.042$ & \cellcolor{green!25} $0.038$ \\
+		& $S_{\alpha}\uparrow$ & \cellcolor{green!25} $0.905$ & $0.901$ \\
+				& $\text{\lr{maxF}}_{\beta}\uparrow$ & \cellcolor{green!25} $0.904$ & $0.903$ \\
+				& $\text{\lr{maxE}}_{\xi}\uparrow$ & \cellcolor{green!25} $0.942$ & $0.940$ \\
+				& $M\downarrow$ & $0.042$ & \cellcolor{green!25} $0.039$ \\
 		\hline
 		\multirow{4}{*}{\lr{SSD}} 
-		& $S_{\alpha}\uparrow$ & \cellcolor{green!25} $0.868$ & $0.862$ \\
-				& $\text{\lr{maxF}}_{\beta}\uparrow$ & $0.845$ & \cellcolor{green!25} $0.850$ \\
-				& $\text{\lr{maxE}}_{\xi}\uparrow$ & $0.905$ & \cellcolor{green!25} $0.907$ \\
-				& $M\downarrow$ & $0.053$ & \cellcolor{green!25} $0.047$ \\
+		& $S_{\alpha}\uparrow$ & \cellcolor{green!25} $0.868$ & $0.867$ \\
+				& $\text{\lr{maxF}}_{\beta}\uparrow$ & $0.845$ & \cellcolor{green!25} $0.857$ \\
+				& $\text{\lr{maxE}}_{\xi}\uparrow$ & $0.905$ & \cellcolor{green!25} $0.921$ \\
+				& $M\downarrow$ & $0.053$ & \cellcolor{green!25} $0.045$ \\
 		\hline
 	\end{tabular}
 	\caption{مقایسه روش‌های مختلف روی مجموعه‌داده‌های مختلف. بهترین نتایج برای هر معیار هایلایت شده‌اند.}

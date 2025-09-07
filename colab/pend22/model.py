@@ -260,24 +260,20 @@ class Fusion(nn.Module):
         )
 
         # Bi-directional cross-attention
-        if shape//patch_size > 11:
-            d = 2
-        else:
-            d = 1
-        self.rgb_to_dep = SwinTransformer(
-            img_size=(shape//patch_size, shape//patch_size), patch_size=1,
-            in_chans=embed_dim, embed_dim=embed_dim,
-            depths=[d], num_heads=[num_heads],
-            window_size=11, mlp_ratio=mlp_ratio,
-            attn_drop_rate=attn_dropout, cross_attention=True
-        )
-        self.dep_to_rgb = SwinTransformer(
-            img_size=(shape//patch_size, shape//patch_size), patch_size=1,
-            in_chans=embed_dim, embed_dim=embed_dim,
-            depths=[d], num_heads=[num_heads],
-            window_size=11, mlp_ratio=mlp_ratio,
-            attn_drop_rate=attn_dropout, cross_attention=True
-        )
+        # self.rgb_to_dep = SwinTransformer(
+        #     img_size=(shape//patch_size, shape//patch_size), patch_size=1,
+        #     in_chans=embed_dim, embed_dim=embed_dim,
+        #     depths=[1], num_heads=[num_heads],
+        #     window_size=11, mlp_ratio=mlp_ratio,
+        #     attn_drop_rate=attn_dropout, cross_attention=True
+        # )
+        # self.dep_to_rgb = SwinTransformer(
+        #     img_size=(shape//patch_size, shape//patch_size), patch_size=1,
+        #     in_chans=embed_dim, embed_dim=embed_dim,
+        #     depths=[1], num_heads=[num_heads],
+        #     window_size=11, mlp_ratio=mlp_ratio,
+        #     attn_drop_rate=attn_dropout, cross_attention=True
+        # )
 
         # Learnable fusion weights
         self.alpha = nn.Parameter(torch.tensor(0.5))
@@ -301,12 +297,12 @@ class Fusion(nn.Module):
         dep_self = self.dep_self(Ti)
 
         # 2) Bi-directional cross-attention
-        rgb_cross = self.rgb_to_dep(rgb_self, dep_self)
-        dep_cross = self.dep_to_rgb(dep_self, rgb_self)
+        # rgb_cross = self.rgb_to_dep(rgb_self, dep_self)
+        # dep_cross = self.dep_to_rgb(dep_self, rgb_self)
 
         # 3) Adaptive fusion over {rgb_self, dep_self, rgb_cross, dep_cross}
         fused_stack = torch.stack(
-            [rgb_self, dep_self, rgb_cross, dep_cross], dim=1)  # [B,4,C,h,w]
+            [rgb_self, dep_self], dim=1)  # [B,4,C,h,w]
         context = fused_stack.mean(dim=[3, 4])          # [B,4,C]
         weights = torch.softmax(context.mean(dim=2), 1)  # [B,4]
         fused = (fused_stack * weights[:, :, None,
@@ -572,24 +568,24 @@ class BBSNetTransformerAttention(BaseModel):
         S = [88, 88, 44, 22, 11]
 
         # you can also set per stage (smaller patch for early layers)
-        P = [4, 4, 2, 1, 1]
+        P = [8, 8, 4, 2, 1]
         W = [11, 11, 11, 11, 11]
 
         # Replace FusionBlock2D with RGBDViTBlock
         self.fuse0 = Fusion(
-            in_ch=C[0], embed_dim=embed_dim[0], shape=S[0], swin_depth=3,
+            in_ch=C[0], embed_dim=embed_dim[0], shape=S[0], swin_depth=1,
             num_heads=heads_stage[0], window_size=W[0], patch_size=P[0]
         )
         self.fuse1 = Fusion(
-            in_ch=C[1], embed_dim=embed_dim[1], shape=S[1], swin_depth=3,
+            in_ch=C[1], embed_dim=embed_dim[1], shape=S[1], swin_depth=1,
             num_heads=heads_stage[1], window_size=W[1], patch_size=P[1]
         )
         self.fuse2 = Fusion(
-            in_ch=C[2], embed_dim=embed_dim[2], shape=S[2], swin_depth=3,
+            in_ch=C[2], embed_dim=embed_dim[2], shape=S[2], swin_depth=1,
             num_heads=heads_stage[2], window_size=W[2], patch_size=P[2]
         )
         self.fuse3_1 = Fusion(
-            in_ch=C[3], embed_dim=embed_dim[3], shape=S[3], swin_depth=3,
+            in_ch=C[3], embed_dim=embed_dim[3], shape=S[3], swin_depth=1,
             num_heads=heads_stage[3], window_size=W[3], patch_size=P[3]
         )
         self.fuse4_1 = Fusion(
