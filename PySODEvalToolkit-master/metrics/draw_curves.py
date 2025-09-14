@@ -30,7 +30,7 @@ def draw_curves(
     ncol_of_legend: int = 1,
     separated_legend: bool = False,
     sharey: bool = False,
-    line_width=3,
+    line_width=2,
     save_name=None,
 ):
     """A better curve painter!
@@ -74,7 +74,8 @@ def draw_curves(
     else:
         for x in dataset_aliases.keys():
             if x not in dataset_names_from_npy:
-                raise ValueError(f"{x} must be contained in\n{dataset_names_from_npy}")
+                raise ValueError(
+                    f"{x} must be contained in\n{dataset_names_from_npy}")
 
     if method_aliases is not None:
         target_unique_method_names = []
@@ -94,7 +95,8 @@ def draw_curves(
         our_methods.reverse()
         for x in our_methods:
             if x not in target_unique_method_names:
-                raise ValueError(f"{x} must be contained in\n{target_unique_method_names}")
+                raise ValueError(
+                    f"{x} must be contained in\n{target_unique_method_names}")
             # Put our methods into the head of the name list
             target_unique_method_names.pop(target_unique_method_names.index(x))
             target_unique_method_names.insert(0, x)
@@ -104,13 +106,12 @@ def draw_curves(
     num_our_methods = len(our_methods)
 
     # Give each method a unique color and style.
-    color_table = sorted(
-        [
-            color
-            for name, color in colors.cnames.items()
-            if name not in ["red", "white"] or not name.startswith("light") or "gray" in name
-        ]
-    )
+    color_table = [
+        '#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd',
+        '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf',
+        '#aec7e8', '#ffbb78', '#98df8a', '#ff9896', '#c5b0d5',
+        '#c49c94', '#f7b6d3', '#c7c7c7', '#dbdb8d', '#9edae5'
+    ]
     style_table = ["-", "--", "-.", ":", "."]
 
     unique_method_settings = OrderedDict()
@@ -157,14 +158,18 @@ def draw_curves(
                 y_data = np.linspace(0, 1, 256)
             else:
                 y_data = method_results[y_axis_name]
-                assert isinstance(y_data, (list, tuple)), (method_name, method_results.keys())
+                assert isinstance(y_data, (list, tuple)
+                                  ), (method_name, method_results.keys())
 
             if x_axis_name is None:
                 x_data = np.linspace(0, 1, 256)
             else:
                 x_data = method_results[x_axis_name]
-                assert isinstance(x_data, (list, tuple)), (method_name, method_results.keys())
+                assert isinstance(x_data, (list, tuple)
+                                  ), (method_name, method_results.keys())
 
-            curve_drawer.plot_at_axis(idx, method_setting, x_data=x_data, y_data=y_data)
-        curve_drawer.set_axis_property(idx, dataset_alias, **axes_setting[mode])
+            curve_drawer.plot_at_axis(
+                idx, method_setting, x_data=x_data, y_data=y_data)
+        curve_drawer.set_axis_property(
+            idx, dataset_alias, **axes_setting[mode])
     curve_drawer.save(path=save_name)

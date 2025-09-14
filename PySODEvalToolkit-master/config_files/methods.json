@@ -1,37 +1,407 @@
 {
-    "combined": {
+    "M0": {
         "NLPR": {
-            "path": "../pred/combined/NLPR",
+            "path": "../pred/M0/NLPR",
             "prefix": "",
             "suffix": ".png"
         },
         "SIP": {
-            "path": "../pred/combined/SIP",
+            "path": "../pred/M0/SIP",
             "prefix": "",
             "suffix": ".png"
         },
         "NJU2K": {
-            "path": "../pred/combined/NJU2K",
+            "path": "../pred/M0/NJU2K",
             "prefix": "",
             "suffix": ".png"
         },
         "DES": {
-            "path": "../pred/combined/DES",
+            "path": "../pred/M0/DES",
             "prefix": "",
             "suffix": ".png"
         },
         "LFSD": {
-            "path": "../pred/combined/LFSD",
+            "path": "../pred/M0/LFSD",
             "prefix": "",
             "suffix": ".png"
         },
         "STERE": {
-            "path": "../pred/combined/STERE",
+            "path": "../pred/M0/STERE",
             "prefix": "",
             "suffix": ".png"
         },
         "SSD": {
-            "path": "../pred/combined/SSD",
+            "path": "../pred/M0/SSD",
+            "prefix": "",
+            "suffix": ".png"
+        }
+    },
+    "M1": {
+        "NLPR": {
+            "path": "../pred/M1/NLPR",
+            "prefix": "",
+            "suffix": ".png"
+        },
+        "SIP": {
+            "path": "../pred/M1/SIP",
+            "prefix": "",
+            "suffix": ".png"
+        },
+        "NJU2K": {
+            "path": "../pred/M1/NJU2K",
+            "prefix": "",
+            "suffix": ".png"
+        },
+        "DES": {
+            "path": "../pred/M1/DES",
+            "prefix": "",
+            "suffix": ".png"
+        },
+        "LFSD": {
+            "path": "../pred/M1/LFSD",
+            "prefix": "",
+            "suffix": ".png"
+        },
+        "STERE": {
+            "path": "../pred/M1/STERE",
+            "prefix": "",
+            "suffix": ".png"
+        },
+        "SSD": {
+            "path": "../pred/M1/SSD",
+            "prefix": "",
+            "suffix": ".png"
+        }
+    },
+    "M2": {
+        "NLPR": {
+            "path": "../pred/M2/NLPR",
+            "prefix": "",
+            "suffix": ".png"
+        },
+        "SIP": {
+            "path": "../pred/M2/SIP",
+            "prefix": "",
+            "suffix": ".png"
+        },
+        "NJU2K": {
+            "path": "../pred/M2/NJU2K",
+            "prefix": "",
+            "suffix": ".png"
+        },
+        "DES": {
+            "path": "../pred/M2/DES",
+            "prefix": "",
+            "suffix": ".png"
+        },
+        "LFSD": {
+            "path": "../pred/M2/LFSD",
+            "prefix": "",
+            "suffix": ".png"
+        },
+        "STERE": {
+            "path": "../pred/M2/STERE",
+            "prefix": "",
+            "suffix": ".png"
+        },
+        "SSD": {
+            "path": "../pred/M2/SSD",
+            "prefix": "",
+            "suffix": ".png"
+        }
+    },
+    "M3": {
+        "NLPR": {
+            "path": "../pred/M3/NLPR",
+            "prefix": "",
+            "suffix": ".png"
+        },
+        "SIP": {
+            "path": "../pred/M3/SIP",
+            "prefix": "",
+            "suffix": ".png"
+        },
+        "NJU2K": {
+            "path": "../pred/M3/NJU2K",
+            "prefix": "",
+            "suffix": ".png"
+        },
+        "DES": {
+            "path": "../pred/M3/DES",
+            "prefix": "",
+            "suffix": ".png"
+        },
+        "LFSD": {
+            "path": "../pred/M3/LFSD",
+            "prefix": "",
+            "suffix": ".png"
+        },
+        "STERE": {
+            "path": "../pred/M3/STERE",
+            "prefix": "",
+            "suffix": ".png"
+        },
+        "SSD": {
+            "path": "../pred/M3/SSD",
+            "prefix": "",
+            "suffix": ".png"
+        }
+    },
+    "M4": {
+        "NLPR": {
+            "path": "../pred/M4/NLPR",
+            "prefix": "",
+            "suffix": ".png"
+        },
+        "SIP": {
+            "path": "../pred/M4/SIP",
+            "prefix": "",
+            "suffix": ".png"
+        },
+        "NJU2K": {
+            "path": "../pred/M4/NJU2K",
+            "prefix": "",
+            "suffix": ".png"
+        },
+        "DES": {
+            "path": "../pred/M4/DES",
+            "prefix": "",
+            "suffix": ".png"
+        },
+        "LFSD": {
+            "path": "../pred/M4/LFSD",
+            "prefix": "",
+            "suffix": ".png"
+        },
+        "STERE": {
+            "path": "../pred/M4/STERE",
+            "prefix": "",
+            "suffix": ".png"
+        },
+        "SSD": {
+            "path": "../pred/M4/SSD",
+            "prefix": "",
+            "suffix": ".png"
+        }
+    },
+    "M5": {
+        "NLPR": {
+            "path": "../pred/M5/NLPR",
+            "prefix": "",
+            "suffix": ".png"
+        },
+        "SIP": {
+            "path": "../pred/M5/SIP",
+            "prefix": "",
+            "suffix": ".png"
+        },
+        "NJU2K": {
+            "path": "../pred/M5/NJU2K",
+            "prefix": "",
+            "suffix": ".png"
+        },
+        "DES": {
+            "path": "../pred/M5/DES",
+            "prefix": "",
+            "suffix": ".png"
+        },
+        "LFSD": {
+            "path": "../pred/M5/LFSD",
+            "prefix": "",
+            "suffix": ".png"
+        },
+        "STERE": {
+            "path": "../pred/M5/STERE",
+            "prefix": "",
+            "suffix": ".png"
+        },
+        "SSD": {
+            "path": "../pred/M5/SSD",
+            "prefix": "",
+            "suffix": ".png"
+        }
+    },
+    "M6": {
+        "NLPR": {
+            "path": "../pred/M6/NLPR",
+            "prefix": "",
+            "suffix": ".png"
+        },
+        "SIP": {
+            "path": "../pred/M6/SIP",
+            "prefix": "",
+            "suffix": ".png"
+        },
+        "NJU2K": {
+            "path": "../pred/M6/NJU2K",
+            "prefix": "",
+            "suffix": ".png"
+        },
+        "DES": {
+            "path": "../pred/M6/DES",
+            "prefix": "",
+            "suffix": ".png"
+        },
+        "LFSD": {
+            "path": "../pred/M6/LFSD",
+            "prefix": "",
+            "suffix": ".png"
+        },
+        "STERE": {
+            "path": "../pred/M6/STERE",
+            "prefix": "",
+            "suffix": ".png"
+        },
+        "SSD": {
+            "path": "../pred/M6/SSD",
+            "prefix": "",
+            "suffix": ".png"
+        }
+    },
+    "M7": {
+        "NLPR": {
+            "path": "../pred/M7/NLPR",
+            "prefix": "",
+            "suffix": ".png"
+        },
+        "SIP": {
+            "path": "../pred/M7/SIP",
+            "prefix": "",
+            "suffix": ".png"
+        },
+        "NJU2K": {
+            "path": "../pred/M7/NJU2K",
+            "prefix": "",
+            "suffix": ".png"
+        },
+        "DES": {
+            "path": "../pred/M7/DES",
+            "prefix": "",
+            "suffix": ".png"
+        },
+        "LFSD": {
+            "path": "../pred/M7/LFSD",
+            "prefix": "",
+            "suffix": ".png"
+        },
+        "STERE": {
+            "path": "../pred/M7/STERE",
+            "prefix": "",
+            "suffix": ".png"
+        },
+        "SSD": {
+            "path": "../pred/M7/SSD",
+            "prefix": "",
+            "suffix": ".png"
+        }
+    },
+    "M8": {
+        "NLPR": {
+            "path": "../pred/M8/NLPR",
+            "prefix": "",
+            "suffix": ".png"
+        },
+        "SIP": {
+            "path": "../pred/M8/SIP",
+            "prefix": "",
+            "suffix": ".png"
+        },
+        "NJU2K": {
+            "path": "../pred/M8/NJU2K",
+            "prefix": "",
+            "suffix": ".png"
+        },
+        "DES": {
+            "path": "../pred/M8/DES",
+            "prefix": "",
+            "suffix": ".png"
+        },
+        "LFSD": {
+            "path": "../pred/M8/LFSD",
+            "prefix": "",
+            "suffix": ".png"
+        },
+        "STERE": {
+            "path": "../pred/M8/STERE",
+            "prefix": "",
+            "suffix": ".png"
+        },
+        "SSD": {
+            "path": "../pred/M8/SSD",
+            "prefix": "",
+            "suffix": ".png"
+        }
+    },
+    "M9": {
+        "NLPR": {
+            "path": "../pred/M9/NLPR",
+            "prefix": "",
+            "suffix": ".png"
+        },
+        "SIP": {
+            "path": "../pred/M9/SIP",
+            "prefix": "",
+            "suffix": ".png"
+        },
+        "NJU2K": {
+            "path": "../pred/M9/NJU2K",
+            "prefix": "",
+            "suffix": ".png"
+        },
+        "DES": {
+            "path": "../pred/M9/DES",
+            "prefix": "",
+            "suffix": ".png"
+        },
+        "LFSD": {
+            "path": "../pred/M9/LFSD",
+            "prefix": "",
+            "suffix": ".png"
+        },
+        "STERE": {
+            "path": "../pred/M9/STERE",
+            "prefix": "",
+            "suffix": ".png"
+        },
+        "SSD": {
+            "path": "../pred/M9/SSD",
+            "prefix": "",
+            "suffix": ".png"
+        }
+    },
+    "M10": {
+        "NLPR": {
+            "path": "../pred/M10/NLPR",
+            "prefix": "",
+            "suffix": ".png"
+        },
+        "SIP": {
+            "path": "../pred/M10/SIP",
+            "prefix": "",
+            "suffix": ".png"
+        },
+        "NJU2K": {
+            "path": "../pred/M10/NJU2K",
+            "prefix": "",
+            "suffix": ".png"
+        },
+        "DES": {
+            "path": "../pred/M10/DES",
+            "prefix": "",
+            "suffix": ".png"
+        },
+        "LFSD": {
+            "path": "../pred/M10/LFSD",
+            "prefix": "",
+            "suffix": ".png"
+        },
+        "STERE": {
+            "path": "../pred/M10/STERE",
+            "prefix": "",
+            "suffix": ".png"
+        },
+        "SSD": {
+            "path": "../pred/M10/SSD",
             "prefix": "",
             "suffix": ".png"
         }

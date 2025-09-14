@@ -56,18 +56,18 @@ def csv_to_latex_table(csv_file_path, output_file_path=None):
 
     # Dictionary to map method names to display names
     method_display_names = {
-        'bbsnet': 'مدل مرجع',
-        # 'fullspatial_cpa_stack_sl': 'مدل ۱',
-        # 'fullspatial_cpa_stack_sl3': 'مدل ۲',
-        # 'fullspatial_stack_sl_depth3': 'مدل ۳',
-        # 'fullspatial_cpa_stack_sl_p8': 'مدل ۴',
-        # 'patchify_sl': 'مدل ۵',
-        # 'fullspatial_stack_sl_cross': 'مدل ۶',
-        # 'fullspatial_stack_sl_depth3_noc': 'مدل ۷',
-        'combined': 'مدل ۸',
-        # 'no_dem_no_cross': 'مدل ۹',
-        # 'p8_noc': 'مدل ۱۰',
-        # Add more mappings as needed
+        'M0': 'مدل مرجع',  # bbsnet
+        'M1': 'مدل ۱',  # fullspatial_cpa_stack_sl
+        'M2': 'مدل ۲',  # fullspatial_cpa_stack_sl3
+        'M3': 'مدل ۳',  # fullspatial_stack_sl_depth3
+        'M4': 'مدل ۴',  # fullspatial_cpa_stack_sl_p8
+        'M5': 'مدل ۵',  # patchify_sl
+        'M6': 'مدل ۶',  # fullspatial_stack_sl_cross
+        'M7': 'مدل ۷',  # fullspatial_stack_sl_depth3_noc
+        'M8': 'مدل ۸',  # noc_nostack
+        # 'combined': 'مدل ۹',
+        'M9': 'مدل ۹',  # combined_p4
+        'M10': 'مدل ۱۰',  # p8_noc
     }
 
     # Generate selected_methods from the dictionary keys

@@ -110,7 +110,7 @@ def train(train_loader, model, optimizer, epoch, save_path, CE, total_step):
             s1, s2 = model(images, depths)
             loss1 = structure_loss(s1, gts)
             loss2 = structure_loss(s2, gts)
-            loss = 0.3*loss1 + 0.9*loss2
+            loss = loss2
             loss.backward()
 
             clip_gradient(optimizer, opt.clip)
