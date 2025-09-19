@@ -29,9 +29,10 @@ for ds in datasets:
 # methods = [m for m in os.listdir(
 #     PRED_ROOT) if os.path.isdir(os.path.join(PRED_ROOT, m))]
 
-methods = [
-    'M0', 'M1', 'M2', 'M3', 'M4', 'M5', 'M6', 'M7', 'M8', 'M9', 'M10'
-]
+# methods = [
+#     'M0', 'M1', 'M2', 'M3', 'M4', 'M5', 'M6', 'M7', 'M8', 'M9', 'M10'
+# ]
+methods = ['bbs_sl']
 # Create method_configs dictionary
 method_configs = {}
 for m in methods:

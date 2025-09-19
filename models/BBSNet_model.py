@@ -750,6 +750,12 @@ class BBSNetTransformerAttention(BaseModel):
         self.cpa3 = CPA(C[3])
         self.cpa4 = CPA(C[4])
 
+        self.cpa0d = CPA(C[0])
+        self.cpa1d = CPA(C[1])
+        self.cpa2d = CPA(C[2])
+        self.cpa3d = CPA(C[3])
+        self.cpa4d = CPA(C[4])
+
         if self.training:
             self.initialize_weights()
 
@@ -766,39 +772,34 @@ class BBSNetTransformerAttention(BaseModel):
         x_depth = self.resnet_depth.maxpool(x_depth)
 
         # x, x_depth = self.rectify0(x, x_depth)
-        x = x + self.cpa0(x_depth)
 
         # layer1
-        x1 = self.resnet.layer1(x)
+        x1 = self.resnet.layer1(x + self.cpa0(x_depth))
         x1_depth = self.resnet_depth.layer1(x_depth)
         # x1, x1_depth = self.rectify1(x1, x1_depth)
-        x1 = x1 + self.cpa1(x1_depth)
 
         # layer2
-        x2 = self.resnet.layer2(x1)
+        x2 = self.resnet.layer2(x1 + self.cpa1(x1_depth))
         x2_depth = self.resnet_depth.layer2(x1_depth)
         # x2, x2_depth = self.rectify2(x2, x2_depth)
-        x2 = x2 + self.cpa2(x2_depth)
 
         # layer3_1
-        x3_1 = self.resnet.layer3_1(x2)
+        x3_1 = self.resnet.layer3_1(x2 + self.cpa2(x2_depth))
         x3_1_depth = self.resnet_depth.layer3_1(x2_depth)
         # x3_1, x3_1_depth = self.rectify3(x3_1, x3_1_depth)
-        x3_1 = x3_1 + self.cpa3(x3_1_depth)
 
         # layer4_1
-        x4_1 = self.resnet.layer4_1(x3_1)
+        x4_1 = self.resnet.layer4_1(x3_1 + self.cpa3(x3_1_depth))
         x4_1_depth = self.resnet_depth.layer4_1(x3_1_depth)
         # x4_1, x4_1_depth = self.rectify4(x4_1, x4_1_depth)
-        x4_1 = x4_1 + self.cpa4(x4_1_depth)
 
         # =======================================================
 
-        x = self.fuse0(x, x_depth)
-        x1 = self.fuse1(x1, x1_depth)
-        x2 = self.fuse2(x2, x2_depth)
-        x3_1 = self.fuse3_1(x3_1, x3_1_depth)
-        x4_1 = self.fuse4_1(x4_1, x4_1_depth)
+        x = self.fuse0(x, self.cpa0d(x_depth))
+        x1 = self.fuse1(x1, self.cpa1d(x1_depth))
+        x2 = self.fuse2(x2, self.cpa2d(x2_depth))
+        x3_1 = self.fuse3_1(x3_1, self.cpa3d(x3_1_depth))
+        x4_1 = self.fuse4_1(x4_1, self.cpa4d(x4_1_depth))
 
         # =======================================================
 

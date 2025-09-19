@@ -234,54 +234,192 @@ class Refine(nn.Module):
 # ==================================================================
 
 
+def get_2d_sincos_pos_embed(h, w, dim, device):
+    """Create 2D sinusoidal positional embeddings (H*W, dim)."""
+    assert dim % 2 == 0, "PE dim must be even"
+    y_embed = torch.arange(h, device=device).float().unsqueeze(1).repeat(1, w)
+    x_embed = torch.arange(w, device=device).float().unsqueeze(0).repeat(h, 1)
+
+    div_term = torch.exp(torch.arange(0, dim // 2, 2, device=device).float()
+                         * (-torch.log(torch.tensor(10000.0, device=device)) / (dim // 2)))
+
+    pe_y = torch.zeros(h, w, dim // 2, device=device)
+    pe_x = torch.zeros(h, w, dim // 2, device=device)
+
+    pe_y[..., 0::2] = torch.sin(y_embed.unsqueeze(-1) * div_term)
+    pe_y[..., 1::2] = torch.cos(y_embed.unsqueeze(-1) * div_term)
+
+    pe_x[..., 0::2] = torch.sin(x_embed.unsqueeze(-1) * div_term)
+    pe_x[..., 1::2] = torch.cos(x_embed.unsqueeze(-1) * div_term)
+
+    pe = torch.cat([pe_y, pe_x], dim=-1)  # (H, W, dim)
+    pe = pe.view(h * w, dim)
+    return pe
+
+
+class CoarseCrossAttention(nn.Module):
+    """
+    Coarse (patchified) cross-attention block.
+    - Patchify both modalities with pooling to suppress noise / misalignment
+    - Apply global MultiheadAttention at the coarse scale
+    - (Optional) confidence gating derived from the KV modality
+    - Upsample back to the original spatial size and fuse residually
+
+    Forward(x_q, x_kv):
+        x_q:  [B, C, H, W]  (query stream to be modulated)
+        x_kv: [B, C, H, W]  (key/value stream providing guidance)
+    Returns:
+        out: [B, C, H, W]
+    """
+
+    def __init__(self, embed_dim, attn_dim=None, num_heads=8, patch=4, dropout=0.1,
+                 use_confidence=True, pooling="avg"):
+        super().__init__()
+        self.embed_dim = embed_dim
+        self.attn_dim = attn_dim or embed_dim
+        self.num_heads = num_heads
+        self.patch = patch
+        self.use_confidence = use_confidence
+
+        if pooling == "avg":
+            self.pool = nn.AvgPool2d(
+                kernel_size=patch, stride=patch, ceil_mode=False)
+        elif pooling == "max":
+            self.pool = nn.MaxPool2d(kernel_size=patch, stride=patch)
+        else:
+            # strided conv can also be used for learnable patchify
+            self.pool = nn.Conv2d(
+                embed_dim, embed_dim, kernel_size=patch, stride=patch, groups=embed_dim, bias=False)
+
+        # projections for Q, K, V
+        self.q_proj = nn.Conv2d(embed_dim, self.attn_dim, 1)
+        self.k_proj = nn.Conv2d(embed_dim, self.attn_dim, 1)
+        self.v_proj = nn.Conv2d(embed_dim, self.attn_dim, 1)
+
+        self.attn = nn.MultiheadAttention(
+            self.attn_dim, num_heads, dropout=dropout, batch_first=False)
+        self.attn_norm = nn.LayerNorm(self.attn_dim)
+
+        # FFN at coarse scale
+        self.ffn = nn.Sequential(
+            nn.Linear(self.attn_dim, self.attn_dim * 4),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(self.attn_dim * 4, self.attn_dim),
+            nn.Dropout(dropout),
+        )
+
+        # project back to feature dim
+        self.out_proj = nn.Conv2d(self.attn_dim, embed_dim, 1)
+        # self.out_norm = nn.BatchNorm2d(embed_dim)
+
+        if self.use_confidence:
+            # produce a confidence mask from KV stream at coarse scale
+            self.conf_head = nn.Sequential(
+                nn.Conv2d(embed_dim, embed_dim // 2, 1),
+                nn.GELU(),
+                nn.Conv2d(embed_dim // 2, 1, 1)
+            )
+
+    def forward(self, x_q, x_kv):
+        B, C, H, W = x_q.shape
+
+        # 1) Patchify & project to attn_dim
+        q = self.pool(x_q)
+        kv = self.pool(x_kv)
+        Hc, Wc = q.shape[-2], q.shape[-1]
+
+        q = self.q_proj(q)   # [B, D, Hc, Wc]
+        k = self.k_proj(kv)  # [B, D, Hc, Wc]
+        v = self.v_proj(kv)  # [B, D, Hc, Wc]
+
+        # 2) Flatten to sequences (L, B, D)
+        q_seq = q.flatten(2).permute(2, 0, 1)
+        k_seq = k.flatten(2).permute(2, 0, 1)
+        v_seq = v.flatten(2).permute(2, 0, 1)
+
+        # 3) Add fixed 2D sin-cos positional encodings (helps alignment)
+        pe = get_2d_sincos_pos_embed(Hc, Wc, q.shape[1], q.device)  # (L, D)
+        pe = pe.unsqueeze(1).expand(-1, B, -1)  # (L, B, D)
+        q_seq = q_seq + pe
+        k_seq = k_seq + pe
+
+        # 4) Global MHA at coarse scale
+        attn_out, _ = self.attn(q_seq, k_seq, v_seq)  # (L, B, D)
+        attn_out = self.attn_norm(attn_out)
+        attn_out = attn_out + self.ffn(attn_out)
+
+        # 5) Back to (B, D, Hc, Wc)
+        attn_out = attn_out.permute(1, 2, 0).contiguous().view(B, -1, Hc, Wc)
+
+        # 6) Optional confidence gating from KV stream
+        if self.use_confidence:
+            conf = torch.sigmoid(self.conf_head(kv))  # [B,1,Hc,Wc]
+            attn_out = attn_out * (1.0 + conf)
+
+        # 7) Project to embed_dim and upsample + residual
+        attn_out = self.out_proj(attn_out)  # [B, C, Hc, Wc]
+        attn_out = F.interpolate(attn_out, size=(
+            H, W), mode='bilinear', align_corners=False)
+        # out = self.out_norm(attn_out)
+        return attn_out
+
+
 class Fusion(nn.Module):
     def __init__(self, in_ch, embed_dim, shape, swin_depth,
                  num_heads, window_size, mlp_ratio=4,
-                 attn_dropout=0.1, dropout=0.1, patch_size=4):
+                 attn_dropout=0.2, dropout=0.1, patch_size=4,
+                 cross_patch=8, cross_heads=None, cross_attn_dim=None,
+                 cross_conf=False, cross_pool="conv"):
         super(Fusion, self).__init__()
 
-        # Channel reduction
         self.rgb_reduce = BasicConv2d(in_ch, embed_dim, 1)
 
-        # Self-attention for each modality
+        # Self-attention branches
         self.rgb_self = SwinTransformer(
             img_size=(shape, shape), patch_size=patch_size,
             in_chans=in_ch, embed_dim=embed_dim,
             depths=[swin_depth], num_heads=[num_heads],
             window_size=window_size, mlp_ratio=mlp_ratio,
-            attn_drop_rate=attn_dropout, ape=True
+            attn_drop_rate=attn_dropout
         )
         self.dep_self = SwinTransformer(
             img_size=(shape, shape), patch_size=patch_size,
             in_chans=in_ch, embed_dim=embed_dim,
             depths=[swin_depth], num_heads=[num_heads],
             window_size=window_size, mlp_ratio=mlp_ratio,
-            attn_drop_rate=attn_dropout, ape=True
+            attn_drop_rate=attn_dropout
         )
 
-        # Bi-directional cross-attention
-        self.rgb_to_dep = SwinTransformer(
-            img_size=(shape//patch_size, shape//patch_size), patch_size=1,
-            in_chans=embed_dim, embed_dim=embed_dim,
-            depths=[1], num_heads=[num_heads],
-            window_size=11, mlp_ratio=mlp_ratio, ape=True,
-            attn_drop_rate=attn_dropout, cross_attention=True
+        # Cross attention
+        self.rgb_to_dep = CoarseCrossAttention(
+            embed_dim=embed_dim,
+            attn_dim=cross_attn_dim or embed_dim,
+            num_heads=cross_heads or num_heads,
+            patch=cross_patch, dropout=dropout,
+            use_confidence=cross_conf, pooling=cross_pool,
         )
-        self.dep_to_rgb = SwinTransformer(
-            img_size=(shape//patch_size, shape//patch_size), patch_size=1,
-            in_chans=embed_dim, embed_dim=embed_dim,
-            depths=[1], num_heads=[num_heads],
-            window_size=11, mlp_ratio=mlp_ratio, ape=True,
-            attn_drop_rate=attn_dropout, cross_attention=True
+        self.dep_to_rgb = CoarseCrossAttention(
+            embed_dim=embed_dim,
+            attn_dim=cross_attn_dim or embed_dim,
+            num_heads=cross_heads or num_heads,
+            patch=cross_patch, dropout=dropout,
+            use_confidence=cross_conf, pooling=cross_pool,
         )
 
-        # Learnable fusion weights
-        self.alpha = nn.Parameter(torch.tensor(0.5))
-        self.beta = nn.Parameter(torch.tensor(0.5))
+        # F1 and F2 = adjustment modules (Conv → BN → GELU)
+        def adjust_block():
+            return nn.Sequential(
+                nn.Conv2d(embed_dim, embed_dim, 3, padding=1),
+                nn.BatchNorm2d(embed_dim),
+                nn.GELU()
+            )
+        self.F1 = adjust_block()
+        self.F2 = adjust_block()
 
-        # Post-fusion feedforward network
+        # F3 = refinement after sum
         hidden_dim = embed_dim * mlp_ratio
-        self.mlp = nn.Sequential(
+        self.F3 = nn.Sequential(
             nn.Conv2d(embed_dim, hidden_dim, 1),
             nn.GELU(),
             nn.Dropout(dropout),
@@ -289,33 +427,34 @@ class Fusion(nn.Module):
             nn.Dropout(dropout)
         )
 
+        self.out_norm = nn.BatchNorm2d(embed_dim)
+
     def forward(self, Ri, Ti):
         B, C, H, W = Ri.shape
 
-        # 1) Self-attention
+        # Self attention (anchor)
         rgb_self = self.rgb_self(Ri)
         dep_self = self.dep_self(Ti)
 
-        # 2) Bi-directional cross-attention
-        rgb_cross = self.rgb_to_dep(rgb_self, dep_self)
-        dep_cross = self.dep_to_rgb(dep_self, rgb_self)
+        # Cross attention (raw)
+        cross1 = self.dep_to_rgb(rgb_self, dep_self)   # depth → RGB
+        cross2 = self.rgb_to_dep(dep_self, rgb_self)   # RGB → depth
 
-        # 3) Adaptive fusion over {rgb_self, dep_self, rgb_cross, dep_cross}
-        fused_stack = torch.stack(
-            [rgb_self, dep_self, rgb_cross, dep_cross], dim=1)  # [B,4,C,h,w]
-        context = fused_stack.mean(dim=[3, 4])          # [B,4,C]
-        weights = torch.softmax(context.mean(dim=2), 1)  # [B,4]
-        fused = (fused_stack * weights[:, :, None,
-                 None, None]).sum(dim=1)  # [B,C,h,w]
+        # Adjustments
+        F1_out = self.F1(cross1)
+        F2_out = self.F2(cross2)
 
-        # 4) Post-fusion refinement (residual)
-        fused = self.mlp(fused) + fused
+        # Fusion: self + adjusted cross
+        fused = rgb_self + F1_out + F2_out
 
-        # 5) Upsample to input size
-        fused = F.interpolate(fused, size=(
-            H, W), mode='bilinear', align_corners=False)
+        # Refinement
+        fused = self.F3(fused)
 
-        # 6) Low-level RGB residual (same as your original intent)
+        # Resize back
+        fused = F.interpolate(
+            fused, size=(H, W), mode='bilinear', align_corners=False
+        )
+
         Ri_low = self.rgb_reduce(Ri)  # [B,C,H,W]
         return fused + Ri_low
 
@@ -573,24 +712,24 @@ class BBSNetTransformerAttention(BaseModel):
 
         # Replace FusionBlock2D with RGBDViTBlock
         self.fuse0 = Fusion(
-            in_ch=C[0], embed_dim=embed_dim[0], shape=S[0], swin_depth=2,
-            num_heads=heads_stage[0], window_size=W[0], patch_size=P[0]
+            in_ch=C[0], embed_dim=embed_dim[0], shape=S[0], swin_depth=3,
+            num_heads=heads_stage[0], window_size=W[0], patch_size=P[0], cross_patch=2
         )
         self.fuse1 = Fusion(
-            in_ch=C[1], embed_dim=embed_dim[1], shape=S[1], swin_depth=2,
-            num_heads=heads_stage[1], window_size=W[1], patch_size=P[1]
+            in_ch=C[1], embed_dim=embed_dim[1], shape=S[1], swin_depth=3,
+            num_heads=heads_stage[1], window_size=W[1], patch_size=P[1], cross_patch=2
         )
         self.fuse2 = Fusion(
-            in_ch=C[2], embed_dim=embed_dim[2], shape=S[2], swin_depth=2,
-            num_heads=heads_stage[2], window_size=W[2], patch_size=P[2]
+            in_ch=C[2], embed_dim=embed_dim[2], shape=S[2], swin_depth=3,
+            num_heads=heads_stage[2], window_size=W[2], patch_size=P[2], cross_patch=2
         )
         self.fuse3_1 = Fusion(
-            in_ch=C[3], embed_dim=embed_dim[3], shape=S[3], swin_depth=2,
-            num_heads=heads_stage[3], window_size=W[3], patch_size=P[3]
+            in_ch=C[3], embed_dim=embed_dim[3], shape=S[3], swin_depth=3,
+            num_heads=heads_stage[3], window_size=W[3], patch_size=P[3], cross_patch=2
         )
         self.fuse4_1 = Fusion(
             in_ch=C[4], embed_dim=embed_dim[4], shape=S[4], swin_depth=1,
-            num_heads=heads_stage[4], window_size=W[4], patch_size=P[4]
+            num_heads=heads_stage[4], window_size=W[4], patch_size=P[4], cross_patch=1
         )
 
         channel = 32

@@ -1,7 +1,7 @@
 import argparse
 import sys
 
-version = 'fullspatial_cpa_stack_sl_p4_ape'
+version = 'simple_fusion_Ri'
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--epoch', type=int, default=200, help='epoch number')
@@ -30,11 +30,11 @@ parser.add_argument('--gt_root', type=str,
                     default='/content/dataset/RGBD_for_train/GT/', help='the training gt images root')
 
 parser.add_argument('--test_rgb_root', type=str,
-                    default='/content/dataset/test_in_train/RGB/', help='the test rgb images root')
+                    default='/content/dataset/test_in_train/', help='the test rgb images root')
 parser.add_argument('--test_depth_root', type=str,
-                    default='/content/dataset/test_in_train/depth/', help='the test depth images root')
+                    default='/content/dataset/test_in_train/', help='the test depth images root')
 parser.add_argument('--test_gt_root', type=str,
-                    default='/content/dataset/test_in_train/GT/', help='the test gt images root')
+                    default='/content/dataset/test_in_train/', help='the test gt images root')
 
 parser.add_argument('--save_path', type=str, default=f'/content/drive/My Drive/sod/BBS-Net/{version}/',
                     help='the path to save models and logs')

@@ -617,7 +617,7 @@ class SwinTransformer(nn.Module):
             )
             self.layers.append(layer)
 
-        # self.norm = norm_layer(self.num_features)
+        self.norm = norm_layer(self.num_features)
         self.apply(self._init_weights)
 
     def _init_weights(self, m):
@@ -671,7 +671,7 @@ class SwinTransformer(nn.Module):
                         1).permute(0, 3, 1, 2).contiguous()
             layer_features.append(xl)
 
-        # x = self.norm(x)
+        x = self.norm(x)
         B, L, C = x.shape
         x = x.view(B, int(np.sqrt(L)), int(np.sqrt(L)), -
                    1).permute(0, 3, 1, 2).contiguous()

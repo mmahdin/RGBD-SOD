@@ -107,9 +107,10 @@ def train(train_loader, model, optimizer, epoch, save_path, CE, total_step):
             gts = gts.cuda()
             depths = depths.cuda()
 
-            s1, s2 = model(images, depths)
+            s1, s2, s3 = model(images, depths)
             loss1 = structure_loss(s1, gts)
             loss2 = structure_loss(s2, gts)
+            loss3 = structure_loss(s3, gts)
             loss = loss2
             loss.backward()
 
